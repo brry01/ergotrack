@@ -18,6 +18,9 @@ import os
 import time
 from typing import Optional, Tuple
 
+import glob
+import re
+
 import cv2
 import numpy as np
 
@@ -221,43 +224,87 @@ class VisionManager:
         except Exception:
             logger.debug("GStreamer init error.", exc_info=True)
 
-        # --- 2-4. Standard OpenCV backends (USB webcams / PC built-ins) ------
-        candidates = [
-            (cv2.CAP_V4L2,  cv2.VideoWriter_fourcc(*"MJPG"), "V4L2/MJPEG"),
-            (cv2.CAP_V4L2,  cv2.VideoWriter_fourcc(*"YUYV"), "V4L2/YUYV"),
-            (cv2.CAP_ANY,   None,                            "AUTO"),
+        # --- 2-4. Standard OpenCV backends (scan all /dev/video* devices) -----
+        #
+        # On RPi OS the Camera Module 3 (rp1-cfe raw CSI) cannot be opened
+        # directly by OpenCV.  A v4l2loopback virtual device fed by libcamera-vid
+        # is the cleanest workaround when OpenCV is built without GStreamer:
+        #
+        #   sudo apt install v4l2loopback-dkms
+        #   sudo modprobe v4l2loopback devices=1 video_nr=42 card_label=ErgoCamera exclusive_caps=1
+        #   echo "options v4l2loopback devices=1 video_nr=42 card_label=ErgoCamera exclusive_caps=1" \
+        #     | sudo tee /etc/modprobe.d/v4l2loopback.conf
+        #   echo "v4l2loopback" | sudo tee -a /etc/modules
+        #   sudo systemctl enable --now ergo-camera.service   # see scripts/setup_rpi.sh
+        #
+        # Scanning all /dev/video* devices lets us find the loopback device
+        # regardless of which index the kernel assigned it.
+
+        # Collect device indices from /dev/video* — sort numerically so lower
+        # indices (real sensor or loopback near 0) are tried first.
+        dev_paths = sorted(
+            glob.glob("/dev/video*"),
+            key=lambda p: int(re.search(r"\d+", p).group()),
+        )
+        if not dev_paths:
+            dev_paths = []   # Windows / no V4L2 → fall through to AUTO
+
+        fourccs = [
+            (cv2.VideoWriter_fourcc(*"MJPG"), "MJPEG"),
+            (cv2.VideoWriter_fourcc(*"YUYV"), "YUYV"),
+            (None,                            "default"),
         ]
-        for backend, fourcc, label in candidates:
-            cap = cv2.VideoCapture(0, backend)
-            if fourcc is not None:
-                cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            cap.set(cv2.CAP_PROP_FPS, fps)
 
-            if not cap.isOpened():
+        for dev_path in dev_paths:
+            dev_idx = int(re.search(r"\d+", dev_path).group())
+            for fourcc, fmt_label in fourccs:
+                cap = cv2.VideoCapture(dev_idx, cv2.CAP_V4L2)
+                if fourcc is not None:
+                    cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                cap.set(cv2.CAP_PROP_FPS, fps)
+
+                if not cap.isOpened():
+                    cap.release()
+                    break   # device not accessible — skip remaining fourccs
+
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
+                    self._camera = cap
+                    logger.info("Camera: V4L2 %s fmt=%s (%dx%d).",
+                                dev_path, fmt_label, w, h)
+                    return
+
                 cap.release()
-                continue
+                logger.debug("V4L2 %s fmt=%s: opened but no frames.", dev_path, fmt_label)
 
-            # Verify that frames actually arrive (not just that the device opened)
+        # Last resort: OpenCV AUTO (works on Windows/macOS with built-in webcam)
+        cap = cv2.VideoCapture(0, cv2.CAP_ANY)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+        if cap.isOpened():
             ret, test_frame = cap.read()
             if ret and test_frame is not None:
                 self._camera = cap
-                logger.info("Camera: OpenCV %s (%dx%d).", label, w, h)
+                logger.info("Camera: OpenCV AUTO (%dx%d).", w, h)
                 return
-
-            logger.debug("Camera backend %s opened but gave no frames — trying next.", label)
-            cap.release()
+        cap.release()
 
         raise RuntimeError(
             "No camera backend could deliver frames.\n"
             "\n"
-            "RPi OS + Camera Module 3: install GStreamer support and retry:\n"
-            "  sudo apt install gstreamer1.0-libcamera gstreamer1.0-plugins-good\n"
+            "RPi OS + Camera Module 3 — set up the v4l2loopback virtual device:\n"
+            "  sudo apt install v4l2loopback-dkms ffmpeg\n"
+            "  sudo modprobe v4l2loopback devices=1 video_nr=42 \\\n"
+            "      card_label=ErgoCamera exclusive_caps=1\n"
+            "  libcamera-vid --nopreview -t 0 --width 640 --height 480 \\\n"
+            "      --framerate 15 --codec yuv420 --output - 2>/dev/null | \\\n"
+            "  ffmpeg -f rawvideo -pix_fmt yuv420p -s 640x480 -r 15 -i - \\\n"
+            "      -f v4l2 -pix_fmt yuv420p /dev/video42 &\n"
             "\n"
-            "USB webcam: check v4l2-ctl --list-devices\n"
-            "\n"
-            "Or use simulation mode: python main.py --simulate"
+            "Then re-run ErgoTrack, or use: python main.py --simulate"
         )
 
     def _grab_frame(self) -> Optional[np.ndarray]:
