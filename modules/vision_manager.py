@@ -84,6 +84,7 @@ class VisionManager:
         self._config = config
         self._camera = None
         self._use_picamera2 = False
+        self._use_gstreamer = False
         self._landmarker: Optional[PoseLandmarker] = None
         self._start_ns = time.perf_counter_ns()
 
@@ -178,9 +179,49 @@ class VisionManager:
                 logger.exception("picamera2 init failed — falling back to OpenCV.")
                 self._camera = None
 
-        # OpenCV fallback — try backends in order until frames actually arrive.
-        # On RPi OS Bookworm the Camera Module 3 exposes a V4L2 device; it
-        # requires an explicit backend + MJPEG codec to return real frames.
+        # OpenCV fallback — try backends in priority order until frames arrive.
+        #
+        # On RPi OS with Camera Module 3 (rp1-cfe raw CSI device), standard
+        # V4L2 capture devices are NOT available to OpenCV.  libcamera owns the
+        # sensor exclusively.  The only way to read frames from a non-system
+        # Python (e.g., pyenv venv) is via GStreamer's libcamerasrc element,
+        # which bridges libcamera → GStreamer → OpenCV appsink.
+        #
+        # Candidate order:
+        #   1. GStreamer / libcamerasrc  — RPi OS with Camera Module 3
+        #   2. V4L2 + MJPEG             — USB webcams and some CSI cameras
+        #   3. V4L2 + YUYV              — another common USB format
+        #   4. OpenCV AUTO              — PC built-in webcams
+
+        fps = self._config.fps
+
+        # --- 1. GStreamer libcamerasrc (RPi Camera Module 3 on RPi OS) -------
+        # Requires: sudo apt install gstreamer1.0-libcamera gstreamer1.0-plugins-good
+        #           and OpenCV built with GStreamer support (default in apt opencv)
+        gst_pipeline = (
+            f"libcamerasrc ! "
+            f"video/x-raw,width={w},height={h},framerate={fps}/1 ! "
+            f"videoconvert ! "
+            f"video/x-raw,format=BGR ! "
+            f"appsink drop=true max-buffers=1 sync=false"
+        )
+        try:
+            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
+                    self._camera = cap
+                    self._use_gstreamer = True
+                    logger.info("Camera: GStreamer/libcamerasrc (%dx%d).", w, h)
+                    return
+                cap.release()
+                logger.debug("GStreamer pipeline opened but gave no frames.")
+            else:
+                logger.debug("GStreamer pipeline failed to open (libcamerasrc not available?).")
+        except Exception:
+            logger.debug("GStreamer init error.", exc_info=True)
+
+        # --- 2-4. Standard OpenCV backends (USB webcams / PC built-ins) ------
         candidates = [
             (cv2.CAP_V4L2,  cv2.VideoWriter_fourcc(*"MJPG"), "V4L2/MJPEG"),
             (cv2.CAP_V4L2,  cv2.VideoWriter_fourcc(*"YUYV"), "V4L2/YUYV"),
@@ -192,7 +233,7 @@ class VisionManager:
                 cap.set(cv2.CAP_PROP_FOURCC, fourcc)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            cap.set(cv2.CAP_PROP_FPS, self._config.fps)
+            cap.set(cv2.CAP_PROP_FPS, fps)
 
             if not cap.isOpened():
                 cap.release()
@@ -209,8 +250,13 @@ class VisionManager:
             cap.release()
 
         raise RuntimeError(
-            "Camera opened but returned no frames.\n"
-            "Check: v4l2-ctl --list-devices\n"
+            "No camera backend could deliver frames.\n"
+            "\n"
+            "RPi OS + Camera Module 3: install GStreamer support and retry:\n"
+            "  sudo apt install gstreamer1.0-libcamera gstreamer1.0-plugins-good\n"
+            "\n"
+            "USB webcam: check v4l2-ctl --list-devices\n"
+            "\n"
             "Or use simulation mode: python main.py --simulate"
         )
 
