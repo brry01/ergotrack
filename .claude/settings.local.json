@@ -4,7 +4,14 @@
       "Bash(python -m pytest tests/ -v)",
       "Bash(pip install:*)",
       "WebSearch",
-      "Bash(python -m pytest tests/ -q)"
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(gh pr create --title 'fix\\(vision\\): GStreamer libcamerasrc backend for Camera Module 3 on RPi OS' --base main --body ':*)",
+      "Bash(where gh:*)",
+      "Bash(winget list:*)",
+      "Bash(winget install:*)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth status)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth login --web)",
+      "Bash('C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe' pr create --title 'fix\\(vision\\): GStreamer libcamerasrc backend for Camera Module 3 on RPi OS' --base main --head fix/camera-gstreamer-libcamerasrc --body ':*)"
     ]
   }
 }
