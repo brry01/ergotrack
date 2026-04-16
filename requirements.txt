@@ -1,0 +1,34 @@
+# =============================================================================
+# ErgoTrack — Dependencies
+# =============================================================================
+#
+# Raspberry Pi OS (Bookworm) — SETUP ORDER:
+#   1. Run:  bash scripts/setup_rpi.sh   (installs everything automatically)
+#
+# PC development (x86/x64 — simulation mode only):
+#   1. Run:  pip install -r requirements-dev.txt
+#
+# =============================================================================
+
+# --- Install via apt on RPi OS (faster, pre-built for arm64) ----------------
+# sudo apt install python3-picamera2   # Camera Module 3 support
+# sudo apt install python3-rpi.gpio    # GPIO for RPi5 (via lgpio backend)
+# sudo apt install python3-opencv      # OpenCV
+# sudo apt install python3-numpy       # NumPy
+# sudo apt install python3-pil         # Pillow / PIL
+# sudo apt install python3-tk          # tkinter (required for GUI)
+# sudo apt install python3-lgpio       # lgpio backend for RPi5 GPIO
+
+# --- Install via pip (all platforms) ----------------------------------------
+PyYAML>=6.0
+customtkinter>=5.2
+pytest>=7.4
+luma.oled>=3.12          # SSD1306 OLED — simpler than adafruit on RPi OS
+
+# --- mediapipe for arm64 (RPi OS) — community wheel -------------------------
+# No official aarch64 wheel exists. Install with:
+#   pip install mediapipe --extra-index-url https://pinto0309.github.io/simple/
+# Or download from: https://github.com/PINTO0309/mediapipe-bin
+
+# --- PC development only (x86/x64, simulation mode) ------------------------
+# pip install mediapipe opencv-python Pillow numpy

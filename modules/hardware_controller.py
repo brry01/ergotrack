@@ -1,0 +1,262 @@
+"""Hardware output controller: GPIO, OLED display, buzzer, and status LED.
+
+Auto-detects available hardware at import time.  If GPIO or OLED libraries
+are absent (e.g., on a development PC), the controller transparently enters
+Simulation Mode and prints alerts to stdout instead.
+
+Real hardware wiring (RPi5):
+  - LED:    GPIO led_pin (BCM numbering)
+  - Buzzer: GPIO buzzer_pin (BCM) — PWM at 2 kHz
+  - OLED:   I2C SSD1306 128×64 at address 0x3C (I2C bus 1)
+
+GPIO library priority (RPi OS Bookworm):
+  1. RPi.GPIO  — works on RPi5 via the lgpio backend included in RPi OS
+  2. rpi-lgpio — drop-in replacement if RPi.GPIO is absent
+  Simulation mode activates automatically when neither is available (PC).
+
+OLED library: luma.oled (pip install luma.oled)
+  Simpler than adafruit-circuitpython-ssd1306; no Blinka layer required.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+
+from modules.config_profile import HardwareConfig
+from modules.posture_logic import AlertLevel, PostureReport
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# GPIO detection — try RPi.GPIO first, then rpi-lgpio (RPi5 fallback)
+# ---------------------------------------------------------------------------
+
+_HAS_GPIO = False
+_GPIO = None
+
+try:
+    # RPi.GPIO works on RPi5 when either of these is installed:
+    #   sudo apt install python3-rpi.gpio   (RPi OS system Python only)
+    #   pip install rpi-lgpio               (venv — also installs as RPi.GPIO)
+    import RPi.GPIO as _GPIO        # type: ignore
+    _HAS_GPIO = True
+    logger.debug("GPIO: RPi.GPIO available")
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
+# OLED detection — luma.oled (no Blinka layer needed)
+# ---------------------------------------------------------------------------
+
+_HAS_OLED = False
+_luma_i2c = None
+_luma_ssd1306 = None
+
+try:
+    from luma.core.interface.serial import i2c as _luma_i2c      # type: ignore
+    from luma.oled.device import ssd1306 as _luma_ssd1306        # type: ignore
+    _HAS_OLED = True
+    logger.debug("OLED: luma.oled available")
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
+# PIL (for OLED rendering)
+# ---------------------------------------------------------------------------
+
+_HAS_PIL = False
+try:
+    from PIL import Image as _PIL_Image, ImageDraw as _PIL_Draw, ImageFont as _PIL_Font
+    _HAS_PIL = True
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
+# Buzzer alert patterns  (duration_ms, beep_count)
+# ---------------------------------------------------------------------------
+_BUZZER_FREQ_HZ = 2000
+_BUZZER_PATTERNS = {
+    AlertLevel.LEVEL1: (100, 1),
+    AlertLevel.LEVEL2: (100, 2),
+    AlertLevel.LEVEL3: (300, 3),
+}
+
+
+class HardwareController:
+    """Manages physical alert outputs with automatic simulation fallback.
+
+    Parameters
+    ----------
+    config:
+        Hardware configuration (pin numbers, OLED address, etc.).
+    sim_mode:
+        Force simulation mode regardless of detected hardware.
+        Defaults to True automatically when neither GPIO nor OLED is found.
+    """
+
+    def __init__(self, config: HardwareConfig, sim_mode: bool = False):
+        self._config = config
+        self._sim_mode: bool = sim_mode or not (_HAS_GPIO or _HAS_OLED)
+        self._pwm = None
+        self._oled = None
+        self._buzzer_lock = threading.Lock()
+
+        if self._sim_mode:
+            logger.info("HardwareController: simulation mode active.")
+        else:
+            self._init_gpio()
+            self._init_oled()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def trigger_alert(self, level: AlertLevel):
+        """Fire the appropriate alert output for the given AlertLevel."""
+        if self._sim_mode:
+            if level != AlertLevel.OK:
+                print(f"[ALERT] Level {level.name}", flush=True)
+            return
+
+        if level == AlertLevel.OK:
+            self._led_off()
+            return
+
+        self._led_on()
+
+        pattern = _BUZZER_PATTERNS.get(level)
+        if pattern and self._pwm is not None:
+            duration_ms, count = pattern
+            threading.Thread(
+                target=self._beep,
+                args=(duration_ms, count),
+                daemon=True,
+            ).start()
+
+    def update_oled(self, report: PostureReport):
+        """Render a PostureReport summary to the OLED display."""
+        if self._sim_mode or self._oled is None or not _HAS_PIL:
+            return
+        try:
+            self._render_oled(report)
+        except Exception:
+            logger.exception("OLED render error.")
+
+    def cleanup(self):
+        """Release all hardware resources. Call before process exit."""
+        if self._sim_mode:
+            return
+        try:
+            if self._pwm is not None:
+                self._pwm.stop()
+                self._pwm = None   # prevent PWM.__del__ from calling stop() again
+                                   # after GPIO.cleanup() has freed the lgpio handle
+            if _HAS_GPIO and _GPIO is not None:
+                _GPIO.cleanup()
+        except Exception:
+            logger.exception("GPIO cleanup error.")
+
+    # ------------------------------------------------------------------
+    # Internal — GPIO
+    # ------------------------------------------------------------------
+
+    def _init_gpio(self):
+        if not _HAS_GPIO or _GPIO is None:
+            return
+        try:
+            _GPIO.setmode(_GPIO.BCM)
+            _GPIO.setwarnings(False)
+            _GPIO.setup(self._config.led_pin, _GPIO.OUT, initial=_GPIO.LOW)
+            _GPIO.setup(self._config.buzzer_pin, _GPIO.OUT, initial=_GPIO.LOW)
+            self._pwm = _GPIO.PWM(self._config.buzzer_pin, _BUZZER_FREQ_HZ)
+            logger.info("GPIO initialised (LED=BCM%d, Buzzer=BCM%d).",
+                        self._config.led_pin, self._config.buzzer_pin)
+        except Exception:
+            logger.exception("GPIO init failed — outputs disabled.")
+            self._pwm = None
+
+    def _led_on(self):
+        if _HAS_GPIO and _GPIO is not None:
+            try:
+                _GPIO.output(self._config.led_pin, _GPIO.HIGH)
+            except Exception:
+                pass
+
+    def _led_off(self):
+        if _HAS_GPIO and _GPIO is not None:
+            try:
+                _GPIO.output(self._config.led_pin, _GPIO.LOW)
+            except Exception:
+                pass
+
+    def _beep(self, duration_ms: int, count: int):
+        """Emit a buzzer pattern. Runs in a background thread to avoid
+        blocking the 15 FPS main loop."""
+        with self._buzzer_lock:
+            if self._pwm is None:
+                return
+            for i in range(count):
+                try:
+                    self._pwm.start(50)              # 50% duty cycle → audible tone
+                    time.sleep(duration_ms / 1000.0)
+                    self._pwm.stop()
+                    if i < count - 1:
+                        time.sleep(0.08)             # gap between beeps
+                except Exception:
+                    logger.exception("Buzzer error.")
+                    break
+
+    # ------------------------------------------------------------------
+    # Internal — OLED  (luma.oled + PIL)
+    # ------------------------------------------------------------------
+
+    def _init_oled(self):
+        if not (_HAS_OLED and _luma_i2c and _luma_ssd1306):
+            return
+        try:
+            serial = _luma_i2c(port=1, address=self._config.oled_address)
+            self._oled = _luma_ssd1306(
+                serial,
+                width=self._config.oled_width,
+                height=self._config.oled_height,
+            )
+            logger.info("OLED initialised (SSD1306 at 0x%02X).",
+                        self._config.oled_address)
+        except Exception as exc:
+            # DeviceNotFoundError → no OLED physically connected; warn and continue.
+            # Any other exception is unexpected → log at ERROR.
+            exc_name = type(exc).__name__
+            if "DeviceNotFoundError" in exc_name or "Remote I/O" in str(exc):
+                logger.warning(
+                    "OLED not found at 0x%02X — running without display. "
+                    "Connect an SSD1306 and reboot if needed.",
+                    self._config.oled_address,
+                )
+            else:
+                logger.exception("OLED init failed unexpectedly — display disabled.")
+            self._oled = None
+
+    def _render_oled(self, report: PostureReport):
+        """Draw PostureReport data onto the OLED using luma.oled canvas API."""
+        if not (_HAS_PIL and self._oled is not None):
+            return
+
+        from luma.core.render import canvas   # type: ignore  # local import — only on RPi
+
+        status = report.severity.name
+        lines = [
+            f"ErgoTrack [{status}]",
+            f"Neck: {report.neck_flexion_deg:.1f}deg",
+            f"FHP:  {report.fhp_ratio:.2f}",
+            f"Asym: {report.shoulder_asymmetry_deg:.1f}deg",
+        ]
+
+        try:
+            font = _PIL_Font.load_default()
+        except Exception:
+            font = None
+
+        with canvas(self._oled) as draw:
+            for i, line in enumerate(lines):
+                draw.text((0, i * 14), line, font=font, fill="white")

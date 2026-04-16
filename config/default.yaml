@@ -1,0 +1,28 @@
+vision:
+  fps: 15
+  resolution: [640, 480]
+  model_path: "models/pose_landmarker_full.task"
+
+thresholds:
+  neck_flexion_warn: 25.0       # degrees; 0 = upright, positive = forward flex
+  neck_flexion_severe: 40.0
+  fhp_warn: 0.15                # normalized to shoulder width
+  fhp_severe: 0.30
+  shoulder_asymmetry_warn: 5.0  # degrees of vertical tilt
+  shoulder_asymmetry_severe: 10.0
+
+hardware:
+  buzzer_pin: 18
+  led_pin: 24
+  oled_address: "0x3C"          # quoted string — parsed with int(str(v), 16)
+  oled_width: 128
+  oled_height: 64
+
+alert_state:
+  bad_frame_threshold: 10       # N consecutive bad frames before alert fires
+  good_frame_reset: 5           # M consecutive good frames to clear alert
+
+logging:
+  level: "INFO"
+  csv_output: true
+  csv_path: "ergotrack_log.csv"
