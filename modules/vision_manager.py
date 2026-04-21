@@ -1,7 +1,8 @@
 """Camera capture and MediaPipe pose landmark detection.
 
 Uses the MediaPipe Tasks API (mediapipe >= 0.10) with PoseLandmarker in
-VIDEO running mode, which applies temporal smoothing between frames.
+IMAGE running mode.  VIDEO mode's temporal smoothing triggers a fatal
+cv::remap assertion in MediaPipe's bundled OpenCV 4.5.5 on ARM64 (RPi5).
 
 Camera priority:
   1. picamera2 (RPi Camera Module 3, BGR888 format)
@@ -335,9 +336,15 @@ class VisionManager:
                 "Run:  python scripts/download_models.py"
             )
 
+        # Use IMAGE mode rather than VIDEO mode.
+        # VIDEO mode's temporal smoothing internally calls cv::remap with
+        # transformation maps computed on ARM64/XNNPACK that can produce
+        # out-of-range dimensions, triggering a fatal assertion in MediaPipe's
+        # bundled OpenCV 4.5.5 on RPi5.  IMAGE mode processes each frame
+        # independently and avoids that code path entirely.
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
-            running_mode=RunningMode.VIDEO,   # temporal smoothing between frames
+            running_mode=RunningMode.IMAGE,
             num_poses=1,
             min_pose_detection_confidence=0.5,
             min_pose_presence_confidence=0.5,
@@ -358,12 +365,12 @@ class VisionManager:
         """Run PoseLandmarker on a BGR frame and return PostureLandmarks."""
         try:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            # MediaPipe's bundled OpenCV requires a C-contiguous uint8 array.
-            # MJPEG-decoded frames from v4l2loopback can have non-contiguous
-            # memory layouts that trigger an assertion in remap().
+            # Ensure C-contiguous uint8 layout — MJPEG-decoded frames from
+            # v4l2loopback can have strided views that MediaPipe rejects.
             rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            result = self._landmarker.detect_for_video(mp_image, self._ts_ms())
+            # IMAGE mode: no timestamp argument.
+            result = self._landmarker.detect(mp_image)
         except Exception:
             logger.exception("Landmark detection error.")
             return PostureLandmarks(normalized=[], world=[], is_valid=False)
