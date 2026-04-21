@@ -317,8 +317,22 @@ class VisionManager:
         self._landmarker: Optional[PoseLandmarker] = None
         self._start_ns = time.perf_counter_ns()
 
+        # Background inference cache — updated by _inference_loop thread.
+        # GUI reads these instantly without blocking on inference.
+        self._inf_frame: Optional[np.ndarray] = None
+        self._inf_landmarks = PostureLandmarks(normalized=[], world=[], is_valid=False)
+        self._inf_lock = threading.Lock()
+        self._inf_stop = threading.Event()
+        self._inf_thread: Optional[threading.Thread] = None
+
         self._init_camera()
         self._init_landmarker()
+
+        # Start inference loop after both camera and landmarker are ready
+        self._inf_thread = threading.Thread(
+            target=self._inference_loop, daemon=True, name="ergo-inference"
+        )
+        self._inf_thread.start()
 
     # ------------------------------------------------------------------
     # Context manager
@@ -343,32 +357,25 @@ class VisionManager:
         The BGR frame is deleted as soon as landmarks are extracted —
         no image data persists in memory beyond this call.
         """
-        frame_bgr = self._grab_frame()
-        if frame_bgr is None:
-            return PostureLandmarks(normalized=[], world=[], is_valid=False)
-
-        result = self._detect(frame_bgr)
-
-        # Privacy: delete frame immediately
-        del frame_bgr
-
-        return result
+        with self._inf_lock:
+            return self._inf_landmarks
 
     def capture_with_frame(self) -> Tuple[Optional[np.ndarray], PostureLandmarks]:
-        """GUI mode: return (BGR frame, PostureLandmarks).
+        """GUI mode: return latest cached (BGR frame, PostureLandmarks).
 
-        The frame is never written to disk — it lives only for the current
-        GUI render cycle.
+        Returns instantly — inference runs in the background thread.
         """
-        frame_bgr = self._grab_frame()
-        if frame_bgr is None:
-            return None, PostureLandmarks(normalized=[], world=[], is_valid=False)
-
-        landmarks = self._detect(frame_bgr)
-        return frame_bgr, landmarks
+        with self._inf_lock:
+            frame = self._inf_frame
+            lms = self._inf_landmarks
+        return frame, lms
 
     def release(self):
-        """Release camera and MediaPipe resources."""
+        """Release camera and inference resources."""
+        self._inf_stop.set()
+        if self._inf_thread is not None:
+            self._inf_thread.join(timeout=3)
+
         if self._landmarker is not None:
             try:
                 self._landmarker.close()
@@ -382,10 +389,54 @@ class VisionManager:
                     self._camera.stop()
                     self._camera.close()
                 else:
-                    self._camera.release()   # works for OpenCV cap and _RpicamCapture
+                    self._camera.release()
             except Exception:
                 pass
             self._camera = None
+
+    # ------------------------------------------------------------------
+    # Background inference loop
+    # ------------------------------------------------------------------
+
+    def _inference_loop(self):
+        """Continuously capture frames and run pose inference.
+
+        Stores latest (frame, landmarks) in the cache; GUI reads from it
+        without ever blocking on I/O or inference.
+
+        Design notes
+        ------------
+        * ``_inf_frame`` is updated *before* inference so the video panel
+          refreshes at camera FPS (10 Hz) even while inference runs at its
+          own pace (~3–5 Hz on RPi5).
+        * Same-frame deduplication: inference is skipped when the camera
+          hasn't produced a new frame yet, avoiding wasted CPU cycles when
+          the inference loop is faster than the camera.
+        """
+        _last_frame_id: int = -1   # id() of the last frame we ran inference on
+
+        while not self._inf_stop.is_set():
+            frame_bgr = self._grab_frame()
+            if frame_bgr is None:
+                time.sleep(0.05)
+                continue
+
+            # ── 1. Always push the latest frame to the GUI immediately ──────
+            with self._inf_lock:
+                self._inf_frame = frame_bgr
+
+            # ── 2. Skip inference if the camera hasn't delivered a new frame ─
+            fid = id(frame_bgr)
+            if fid == _last_frame_id:
+                # Inference is faster than the camera; yield briefly and wait.
+                time.sleep(0.02)
+                continue
+            _last_frame_id = fid
+
+            # ── 3. Run inference and update landmark cache ───────────────────
+            landmarks = self._detect(frame_bgr)
+            with self._inf_lock:
+                self._inf_landmarks = landmarks
 
     # ------------------------------------------------------------------
     # Internal — camera
