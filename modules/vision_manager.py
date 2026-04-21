@@ -163,6 +163,84 @@ except ImportError:
     pass
 
 
+# ---------------------------------------------------------------------------
+# rpicam-vid subprocess capture (RPi OS Camera Module 3 without GStreamer)
+# ---------------------------------------------------------------------------
+
+import shutil
+import subprocess
+
+
+class _RpicamCapture:
+    """Stream MJPEG frames from rpicam-vid stdout.
+
+    This completely avoids v4l2loopback, GStreamer, and any kernel module
+    setup.  rpicam-vid writes a raw MJPEG stream to stdout; we parse JPEG
+    boundaries (FF D8 … FF D9) and decode each frame with cv2.imdecode.
+
+    Works from any Python version since it uses only subprocess + OpenCV.
+    """
+
+    _SOI = b"\xff\xd8"   # JPEG Start Of Image marker
+    _EOI = b"\xff\xd9"   # JPEG End Of Image marker
+    _CHUNK = 65536        # read chunk size (64 KB)
+
+    def __init__(self, width: int, height: int, fps: int):
+        # Try rpicam-vid first (newer alias), fall back to libcamera-vid
+        exe = "rpicam-vid" if shutil.which("rpicam-vid") else "libcamera-vid"
+        self._proc = subprocess.Popen(
+            [
+                exe, "--nopreview", "-t", "0",
+                "--width", str(width), "--height", str(height),
+                "--framerate", str(fps),
+                "--codec", "mjpeg", "--output", "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._buf = b""
+
+    # ------------------------------------------------------------------
+    def isOpened(self) -> bool:
+        return self._proc.poll() is None
+
+    def read(self):
+        """Return (True, BGR frame) or (False, None)."""
+        while self.isOpened():
+            chunk = self._proc.stdout.read(self._CHUNK)
+            if not chunk:
+                return False, None
+            self._buf += chunk
+
+            start = self._buf.find(self._SOI)
+            if start == -1:
+                self._buf = b""
+                continue
+            if start > 0:
+                self._buf = self._buf[start:]
+
+            end = self._buf.find(self._EOI, 2)
+            if end == -1:
+                continue   # incomplete frame — read more data
+
+            jpeg = self._buf[: end + 2]
+            self._buf = self._buf[end + 2:]
+
+            frame = cv2.imdecode(
+                np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if frame is not None:
+                return True, frame
+        return False, None
+
+    def release(self):
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=2)
+        except Exception:
+            self._proc.kill()
+
+
 class VisionManager:
     """Captures frames and detects pose landmarks.
 
@@ -197,6 +275,7 @@ class VisionManager:
         self._camera = None
         self._use_picamera2 = False
         self._use_gstreamer = False
+        self._use_rpicam = False
         self._landmarker: Optional[PoseLandmarker] = None
         self._start_ns = time.perf_counter_ns()
 
@@ -265,7 +344,7 @@ class VisionManager:
                     self._camera.stop()
                     self._camera.close()
                 else:
-                    self._camera.release()
+                    self._camera.release()   # works for OpenCV cap and _RpicamCapture
             except Exception:
                 pass
             self._camera = None
@@ -276,6 +355,29 @@ class VisionManager:
 
     def _init_camera(self):
         w, h = self._config.resolution
+
+        # --- 0. rpicam-vid subprocess (RPi OS Camera Module 3, no GStreamer) -
+        # This is the most reliable path on RPi OS when running in a pyenv
+        # venv (where picamera2/libcamera bindings aren't importable).
+        # rpicam-vid writes raw MJPEG to stdout; we parse JPEG boundaries.
+        if shutil.which("rpicam-vid") or shutil.which("libcamera-vid"):
+            try:
+                cap = _RpicamCapture(w, h, self._config.fps)
+                # Give rpicam-vid ~1 s to start streaming
+                import time as _t
+                _t.sleep(1.0)
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
+                    self._camera = cap
+                    self._use_rpicam = True
+                    logger.info("Camera: rpicam-vid MJPEG subprocess (%dx%d).", w, h)
+                    return
+                cap.release()
+                logger.debug("rpicam-vid opened but gave no frames.")
+            except Exception:
+                logger.debug("rpicam-vid init error.", exc_info=True)
+
+        # --- 1. picamera2 (if importable in this Python env) ----------------
         if _HAS_PICAMERA2:
             try:
                 self._camera = Picamera2()
@@ -433,11 +535,10 @@ class VisionManager:
             if self._use_picamera2:
                 frame = self._camera.capture_array()   # BGR888 numpy array
             else:
-                ret, frame = self._camera.read()
+                ret, frame = self._camera.read()       # works for both OpenCV cap and _RpicamCapture
                 if not ret or frame is None:
                     return None
-            # Guarantee C-contiguous layout; some decoders (MJPEG via V4L2)
-            # return strided views that crash MediaPipe's internal remap().
+            # Guarantee C-contiguous layout.
             return np.ascontiguousarray(frame)
         except Exception:
             logger.exception("Frame capture error.")
