@@ -311,10 +311,14 @@ class VisionManager:
         """Capture a single BGR frame from the active camera."""
         try:
             if self._use_picamera2:
-                return self._camera.capture_array()   # BGR888 numpy array
+                frame = self._camera.capture_array()   # BGR888 numpy array
             else:
                 ret, frame = self._camera.read()
-                return frame if ret else None
+                if not ret or frame is None:
+                    return None
+            # Guarantee C-contiguous layout; some decoders (MJPEG via V4L2)
+            # return strided views that crash MediaPipe's internal remap().
+            return np.ascontiguousarray(frame)
         except Exception:
             logger.exception("Frame capture error.")
             return None
@@ -354,6 +358,10 @@ class VisionManager:
         """Run PoseLandmarker on a BGR frame and return PostureLandmarks."""
         try:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            # MediaPipe's bundled OpenCV requires a C-contiguous uint8 array.
+            # MJPEG-decoded frames from v4l2loopback can have non-contiguous
+            # memory layouts that trigger an assertion in remap().
+            rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result = self._landmarker.detect_for_video(mp_image, self._ts_ms())
         except Exception:
