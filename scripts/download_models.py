@@ -1,4 +1,4 @@
-"""Download the MediaPipe PoseLandmarker model file (~30MB) before first run."""
+"""Download pose model files before first run."""
 import os
 import sys
 import urllib.request
@@ -17,9 +17,11 @@ MODELS = {
     # MoveNet Lightning — used by ai-edge-litert backend (avoids MediaPipe's
     # remap crash on RPi5 / Cortex-A76).  Input: 192×192 RGB uint8.
     # Output: [1,1,17,3] → (y_norm, x_norm, confidence) per keypoint.
+    # TFHub serves the file via HTTP redirect; we set a browser User-Agent
+    # so the server accepts the request.
     "movenet_lightning.tflite": (
-        "https://storage.googleapis.com/download.tensorflow.org/models/"
-        "tflite/movenet/movenet_singlepose_lightning_tflite_int8_4.tflite"
+        "https://tfhub.dev/google/lite-model/movenet/singlepose/lightning"
+        "/tflite/int8/4?lite-format=tflite"
     ),
 }
 
@@ -43,6 +45,11 @@ def download(name: str):
         return
     print(f"Downloading {name} ...")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # Use a browser-like User-Agent so TFHub and Google Storage accept the request.
+    opener = urllib.request.build_opener()
+    opener.addheaders = [("User-Agent",
+                          "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36")]
+    urllib.request.install_opener(opener)
     urllib.request.urlretrieve(url, dest, reporthook=_progress)
     print(f"\n  Saved to {dest}")
 
