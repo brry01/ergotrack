@@ -1,7 +1,7 @@
 vision:
   fps: 15
   resolution: [640, 480]
-  model_path: "models/pose_landmarker_full.task"
+  model_path: "models/pose_landmarker_lite.task"
 
 thresholds:
   neck_flexion_warn: 25.0       # degrees; 0 = upright, positive = forward flex
