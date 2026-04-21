@@ -169,6 +169,8 @@ except ImportError:
 
 import shutil
 import subprocess
+import threading
+import queue
 
 
 class _RpicamCapture:
@@ -239,6 +241,42 @@ class _RpicamCapture:
             self._proc.wait(timeout=2)
         except Exception:
             self._proc.kill()
+
+
+class _ThreadedCamera:
+    """Wraps any camera (.read() / .release()) and captures frames in a
+    background thread so the GUI/inference thread never blocks on I/O.
+
+    Always returns the *latest* available frame instantly.
+    """
+
+    def __init__(self, cam):
+        self._cam = cam
+        self._frame: Optional[np.ndarray] = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            ret, frame = self._cam.read()
+            if ret and frame is not None:
+                with self._lock:
+                    self._frame = frame
+
+    def read(self):
+        with self._lock:
+            frame = self._frame
+        return (frame is not None), frame
+
+    def isOpened(self) -> bool:
+        return not self._stop.is_set()
+
+    def release(self):
+        self._stop.set()
+        self._thread.join(timeout=3)
+        self._cam.release()
 
 
 class VisionManager:
@@ -364,11 +402,11 @@ class VisionManager:
             try:
                 cap = _RpicamCapture(w, h, self._config.fps)
                 # Give rpicam-vid ~1 s to start streaming
-                import time as _t
-                _t.sleep(1.0)
+                time.sleep(1.0)
                 ret, test_frame = cap.read()
                 if ret and test_frame is not None:
-                    self._camera = cap
+                    # Wrap in threaded buffer so GUI never blocks on I/O
+                    self._camera = _ThreadedCamera(cap)
                     self._use_rpicam = True
                     logger.info("Camera: rpicam-vid MJPEG subprocess (%dx%d).", w, h)
                     return
@@ -492,7 +530,7 @@ class VisionManager:
                     if cap.read()[0]
                 )
                 if good == _PROBE_FRAMES:
-                    self._camera = cap
+                    self._camera = _ThreadedCamera(cap)
                     logger.info("Camera: V4L2 %s fmt=%s (%dx%d).",
                                 dev_path, fmt_label, w, h)
                     return

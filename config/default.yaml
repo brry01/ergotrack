@@ -1,6 +1,6 @@
 vision:
-  fps: 15
-  resolution: [640, 480]
+  fps: 10
+  resolution: [320, 240]
   model_path: "models/pose_landmarker_lite.task"
 
 thresholds:
