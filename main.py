@@ -9,10 +9,21 @@ Usage:
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# ARM64 / XNNPACK fix — must be set before any mediapipe/TFLite import.
+#
+# On RPi5 (Cortex-A76) the kernel returns EINVAL for prctl(PR_SVE_GET_VL)
+# because the core has no SVE unit.  XNNPACK's multi-threaded SVE probe
+# then produces NaN outputs that corrupt the pose-landmarker's remap() call,
+# triggering a fatal assertion in MediaPipe's bundled OpenCV 4.5.5.
+# Forcing single-threaded mode avoids the multi-threaded SVE code path.
+# ---------------------------------------------------------------------------
+import os
+os.environ.setdefault("TFLITE_NUM_THREADS", "1")
+
 import argparse
 import csv
 import logging
-import os
 import sys
 import time
 from typing import Optional
