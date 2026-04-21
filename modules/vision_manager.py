@@ -1,8 +1,9 @@
 """Camera capture and MediaPipe pose landmark detection.
 
-Uses the MediaPipe Tasks API (mediapipe >= 0.10) with PoseLandmarker in
-IMAGE running mode.  VIDEO mode's temporal smoothing triggers a fatal
-cv::remap assertion in MediaPipe's bundled OpenCV 4.5.5 on ARM64 (RPi5).
+Uses the MediaPipe legacy solutions API (mp.solutions.pose.Pose).
+The Tasks API (PoseLandmarker) crashes on RPi5 (Cortex-A76) with a fatal
+cv::remap assertion in MediaPipe's bundled OpenCV 4.5.5 due to XNNPACK's
+SVE probe failing silently and corrupting bounding-box outputs.
 
 Camera priority:
   1. picamera2 (RPi Camera Module 3, BGR888 format)
@@ -31,20 +32,22 @@ from modules.posture_logic import PostureLandmarks
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# MediaPipe Tasks API imports
+# MediaPipe — prefer the legacy solutions API.
+#
+# The Tasks API (PoseLandmarker) crashes on RPi5 (Cortex-A76) with a fatal
+# assertion in MediaPipe's bundled OpenCV 4.5.5 remap() call regardless of
+# running mode, model size, or thread count.  Root cause: XNNPACK's SVE
+# probe fails on Cortex-A76 (no SVE) and corrupts bounding-box outputs used
+# by the internal image-cropping step.
+#
+# The legacy mp.solutions.pose API uses a different internal graph that does
+# not go through the same remap code path and runs stably on ARM64.
 # ---------------------------------------------------------------------------
 try:
     import mediapipe as mp
-    from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision as mp_vision
-    from mediapipe.tasks.python.vision import (
-        PoseLandmarker,
-        PoseLandmarkerOptions,
-        RunningMode,
-    )
-    from mediapipe.tasks.python.core.base_options import BaseOptions
+    _MP_POSE_CLS = mp.solutions.pose.Pose   # validate attribute exists
     _HAS_MEDIAPIPE = True
-except ImportError:
+except (ImportError, AttributeError):
     _HAS_MEDIAPIPE = False
     logger.warning("mediapipe not installed — VisionManager unavailable.")
 
@@ -329,31 +332,19 @@ class VisionManager:
     # ------------------------------------------------------------------
 
     def _init_landmarker(self):
-        model_path = self._config.model_path
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"MediaPipe model not found: {model_path}\n"
-                "Run:  python scripts/download_models.py"
-            )
-
-        # Use IMAGE mode rather than VIDEO mode.
-        # VIDEO mode's temporal smoothing internally calls cv::remap with
-        # transformation maps computed on ARM64/XNNPACK that can produce
-        # out-of-range dimensions, triggering a fatal assertion in MediaPipe's
-        # bundled OpenCV 4.5.5 on RPi5.  IMAGE mode processes each frame
-        # independently and avoids that code path entirely.
-        options = PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=model_path),
-            running_mode=RunningMode.IMAGE,
-            num_poses=1,
-            min_pose_detection_confidence=0.5,
-            min_pose_presence_confidence=0.5,
+        # Legacy solutions API — avoids the Tasks API remap crash on RPi5.
+        # model_complexity: 0=lite, 1=full, 2=heavy
+        self._landmarker = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            smooth_landmarks=True,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        self._landmarker = PoseLandmarker.create_from_options(options)
-        logger.info("PoseLandmarker loaded: %s", model_path)
+        logger.info("Pose estimator ready (mp.solutions.pose, complexity=1).")
 
-    def _ts_ms(self) -> int:
+    def _ts_ms(self) -> int:  # kept for potential future VIDEO-mode restoration
         """Monotonically increasing timestamp in milliseconds.
 
         Uses perf_counter (not wall clock) to guarantee strict monotonicity
@@ -362,15 +353,13 @@ class VisionManager:
         return (time.perf_counter_ns() - self._start_ns) // 1_000_000
 
     def _detect(self, frame_bgr: np.ndarray) -> PostureLandmarks:
-        """Run PoseLandmarker on a BGR frame and return PostureLandmarks."""
+        """Run pose estimation on a BGR frame and return PostureLandmarks."""
         try:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             # Ensure C-contiguous uint8 layout — MJPEG-decoded frames from
             # v4l2loopback can have strided views that MediaPipe rejects.
             rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            # IMAGE mode: no timestamp argument.
-            result = self._landmarker.detect(mp_image)
+            result = self._landmarker.process(rgb)
         except Exception:
             logger.exception("Landmark detection error.")
             return PostureLandmarks(normalized=[], world=[], is_valid=False)
@@ -378,8 +367,11 @@ class VisionManager:
         if not result.pose_landmarks:
             return PostureLandmarks(normalized=[], world=[], is_valid=False)
 
+        # Legacy API returns landmark lists directly (not wrapped in a list-of-poses).
+        # Each landmark has .x, .y, .z, .visibility — same attribute names as the
+        # Tasks API NormalizedLandmark, so posture_logic/math_utils need no changes.
         return PostureLandmarks(
-            normalized=result.pose_landmarks[0],
-            world=result.pose_world_landmarks[0] if result.pose_world_landmarks else [],
+            normalized=result.pose_landmarks.landmark,
+            world=result.pose_world_landmarks.landmark if result.pose_world_landmarks else [],
             is_valid=True,
         )
