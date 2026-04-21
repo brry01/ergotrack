@@ -349,8 +349,13 @@ class VisionManager:
         # Scanning all /dev/video* devices lets us find the loopback device
         # regardless of which index the kernel assigned it.
 
-        # Collect device indices from /dev/video* — sort numerically so lower
-        # indices (real sensor or loopback near 0) are tried first.
+        # Collect device indices from /dev/video* — sort numerically.
+        # IMPORTANT: on RPi OS with PiSP ISP, devices like /dev/video20-35
+        # belong to the pispbe backend and may return a single stale frame
+        # then nothing.  We require _PROBE_FRAMES consecutive successes to
+        # confirm a device is truly streaming (filters out ISP devices).
+        _PROBE_FRAMES = 3
+
         dev_paths = sorted(
             glob.glob("/dev/video*"),
             key=lambda p: int(re.search(r"\d+", p).group()),
@@ -378,15 +383,21 @@ class VisionManager:
                     cap.release()
                     break   # device not accessible — skip remaining fourccs
 
-                ret, test_frame = cap.read()
-                if ret and test_frame is not None:
+                # Read multiple frames to confirm continuous streaming.
+                # Devices like pispbe return one stale frame then stall.
+                good = sum(
+                    1 for _ in range(_PROBE_FRAMES)
+                    if cap.read()[0]
+                )
+                if good == _PROBE_FRAMES:
                     self._camera = cap
                     logger.info("Camera: V4L2 %s fmt=%s (%dx%d).",
                                 dev_path, fmt_label, w, h)
                     return
 
                 cap.release()
-                logger.debug("V4L2 %s fmt=%s: opened but no frames.", dev_path, fmt_label)
+                logger.debug("V4L2 %s fmt=%s: only %d/%d probe frames — skipping.",
+                             dev_path, fmt_label, good, _PROBE_FRAMES)
 
         # Last resort: OpenCV AUTO (works on Windows/macOS with built-in webcam)
         cap = cv2.VideoCapture(0, cv2.CAP_ANY)
