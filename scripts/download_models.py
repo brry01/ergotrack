@@ -14,6 +14,13 @@ MODELS = {
         "pose_landmarker/pose_landmarker_lite/float16/latest/"
         "pose_landmarker_lite.task"
     ),
+    # MoveNet Lightning — used by ai-edge-litert backend (avoids MediaPipe's
+    # remap crash on RPi5 / Cortex-A76).  Input: 192×192 RGB uint8.
+    # Output: [1,1,17,3] → (y_norm, x_norm, confidence) per keypoint.
+    "movenet_lightning.tflite": (
+        "https://storage.googleapis.com/download.tensorflow.org/models/"
+        "tflite/movenet/movenet_singlepose_lightning_tflite_int8_4.tflite"
+    ),
 }
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
@@ -41,9 +48,13 @@ def download(name: str):
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "pose_landmarker_full.task"
-    if target not in MODELS:
-        print(f"Unknown model: {target}. Choose from: {list(MODELS)}")
+    target = sys.argv[1] if len(sys.argv) > 1 else "movenet_lightning.tflite"
+    if target == "all":
+        for name in MODELS:
+            download(name)
+    elif target not in MODELS:
+        print(f"Unknown model: {target}. Choose from: {list(MODELS)} or 'all'")
         sys.exit(1)
-    download(target)
+    else:
+        download(target)
     print("Done.")

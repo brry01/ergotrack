@@ -1,13 +1,14 @@
-"""Camera capture and MediaPipe pose landmark detection.
+"""Camera capture and pose landmark detection.
 
-Uses the MediaPipe legacy solutions API (mp.solutions.pose.Pose).
-The Tasks API (PoseLandmarker) crashes on RPi5 (Cortex-A76) with a fatal
-cv::remap assertion in MediaPipe's bundled OpenCV 4.5.5 due to XNNPACK's
-SVE probe failing silently and corrupting bounding-box outputs.
+Inference backend priority:
+  1. ai-edge-litert + MoveNet Lightning TFLite  (RPi5 / ARM64 — avoids the
+     MediaPipe remap crash caused by XNNPACK's SVE probe on Cortex-A76)
+  2. mediapipe mp.solutions.pose               (fallback for x86 / PC dev)
 
 Camera priority:
   1. picamera2 (RPi Camera Module 3, BGR888 format)
-  2. OpenCV VideoCapture (USB webcam or built-in — PC development)
+  2. GStreamer libcamerasrc pipeline (RPi OS, Camera Module 3 in pyenv venv)
+  3. OpenCV V4L2 / AUTO (USB webcam or built-in)
 
 Privacy guarantee: frames are deleted from memory immediately after
 landmark detection in headless (capture_and_detect) mode and are never
@@ -32,24 +33,124 @@ from modules.posture_logic import PostureLandmarks
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# MediaPipe — prefer the legacy solutions API.
+# Backend 1: ai-edge-litert + MoveNet (preferred on ARM64 / RPi5)
 #
-# The Tasks API (PoseLandmarker) crashes on RPi5 (Cortex-A76) with a fatal
-# assertion in MediaPipe's bundled OpenCV 4.5.5 remap() call regardless of
-# running mode, model size, or thread count.  Root cause: XNNPACK's SVE
-# probe fails on Cortex-A76 (no SVE) and corrupts bounding-box outputs used
-# by the internal image-cropping step.
-#
-# The legacy mp.solutions.pose API uses a different internal graph that does
-# not go through the same remap code path and runs stably on ARM64.
+# MediaPipe's bundled OpenCV 4.5.5 crashes in remap() on Cortex-A76 because
+# XNNPACK's SVE probe (prctl PR_SVE_GET_VL) fails silently and corrupts the
+# bounding-box outputs used by MediaPipe's internal image-crop step.
+# ai-edge-litert runs TFLite inference directly — no MediaPipe C++ graph,
+# no bundled OpenCV, no remap call.
 # ---------------------------------------------------------------------------
+_HAS_LITERT = False
+try:
+    from ai_edge_litert.interpreter import Interpreter as _LiteRTInterpreter
+    _HAS_LITERT = True
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
+# Backend 2: MediaPipe legacy solutions API (fallback)
+# ---------------------------------------------------------------------------
+_HAS_MEDIAPIPE = False
 try:
     import mediapipe as mp
-    _MP_POSE_CLS = mp.solutions.pose.Pose   # validate attribute exists
+    _mp_pose_test = mp.solutions.pose.Pose   # validate attribute exists
+    del _mp_pose_test
     _HAS_MEDIAPIPE = True
 except (ImportError, AttributeError):
-    _HAS_MEDIAPIPE = False
-    logger.warning("mediapipe not installed — VisionManager unavailable.")
+    pass
+
+if not _HAS_LITERT and not _HAS_MEDIAPIPE:
+    logger.warning("Neither ai-edge-litert nor mediapipe found — VisionManager unavailable.")
+
+
+# ---------------------------------------------------------------------------
+# MoveNet landmark adapter
+# ---------------------------------------------------------------------------
+
+class _LM:
+    """Minimal landmark with x, y, z, visibility (matches MediaPipe's API)."""
+    __slots__ = ("x", "y", "z", "visibility")
+
+    def __init__(self, x: float = 0.5, y: float = 0.5,
+                 z: float = 0.0, visibility: float = 0.0):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.visibility = visibility
+
+
+class _LMList:
+    """Wraps a list as .landmark attribute (matches mp.solutions result)."""
+    def __init__(self, lms):
+        self.landmark = lms
+
+
+class _MoveNetResult:
+    """Mimics mp.solutions.pose.Pose result structure."""
+    def __init__(self, lms):
+        self.pose_landmarks = _LMList(lms) if lms else None
+        self.pose_world_landmarks = None
+
+
+class _MoveNetDetector:
+    """TFLite/MoveNet inference using ai-edge-litert.
+
+    MoveNet keypoints (COCO order, 17 total):
+        0=nose  1=l_eye  2=r_eye  3=l_ear  4=r_ear
+        5=l_sho 6=r_sho  7=l_elbow 8=r_elbow
+        9=l_wrist 10=r_wrist 11=l_hip 12=r_hip
+        13=l_knee 14=r_knee 15=l_ankle 16=r_ankle
+
+    Mapping to MediaPipe indices used by math_utils:
+        MoveNet 3 → MP 7  (LEFT_EAR)
+        MoveNet 4 → MP 8  (RIGHT_EAR)
+        MoveNet 5 → MP 11 (LEFT_SHOULDER)
+        MoveNet 6 → MP 12 (RIGHT_SHOULDER)
+        MoveNet 11 → MP 23 (LEFT_HIP)
+        MoveNet 12 → MP 24 (RIGHT_HIP)
+    """
+
+    _KP_MAP = {3: 7, 4: 8, 5: 11, 6: 12, 11: 23, 12: 24}
+    _NEEDED = list(_KP_MAP.keys())           # MoveNet indices we must see
+    _CONF_THRESHOLD = 0.25                   # min keypoint confidence
+    _N_MP = 33                               # MediaPipe landmark count
+
+    def __init__(self, model_path: str):
+        self._interp = _LiteRTInterpreter(model_path=model_path)
+        self._interp.allocate_tensors()
+        inp = self._interp.get_input_details()[0]
+        self._inp_idx = inp["index"]
+        self._inp_dtype = inp["dtype"]
+        self._inp_size = int(inp["shape"][1])   # 192 (Lightning) or 256 (Thunder)
+        self._out_idx = self._interp.get_output_details()[0]["index"]
+
+    def process(self, rgb: np.ndarray) -> _MoveNetResult:
+        size = self._inp_size
+        img = cv2.resize(rgb, (size, size))
+        if self._inp_dtype == np.uint8:
+            tensor = img[np.newaxis]                          # uint8 int8 quant
+        else:
+            tensor = (img.astype(np.float32) / 255.0)[np.newaxis]
+
+        self._interp.set_tensor(self._inp_idx, tensor)
+        self._interp.invoke()
+
+        # Output shape: [1, 1, 17, 3]  →  [y_norm, x_norm, confidence]
+        kps = self._interp.get_tensor(self._out_idx)[0, 0]  # (17, 3)
+
+        # Reject frame if none of the key landmarks are confidently visible
+        if all(kps[k, 2] < self._CONF_THRESHOLD for k in self._NEEDED):
+            return _MoveNetResult(None)
+
+        lms = [_LM() for _ in range(self._N_MP)]
+        for mn_idx, mp_idx in self._KP_MAP.items():
+            y, x, conf = kps[mn_idx]   # MoveNet outputs (y, x), not (x, y)
+            lms[mp_idx] = _LM(x=float(x), y=float(y), z=0.0, visibility=float(conf))
+        return _MoveNetResult(lms)
+
+    def close(self):
+        pass   # LiteRT interpreter has no explicit close
 
 # ---------------------------------------------------------------------------
 # picamera2 availability
@@ -85,8 +186,12 @@ class VisionManager:
                 "VisionManager should not be instantiated in simulation mode. "
                 "Use CameraSimulator instead."
             )
-        if not _HAS_MEDIAPIPE:
-            raise ImportError("mediapipe is required but not installed.")
+        if not _HAS_LITERT and not _HAS_MEDIAPIPE:
+            raise ImportError(
+                "No pose inference backend found.\n"
+                "Install ai-edge-litert:  pip install ai-edge-litert\n"
+                "Then download the model: python scripts/download_models.py movenet_lightning.tflite"
+            )
 
         self._config = config
         self._camera = None
@@ -332,8 +437,31 @@ class VisionManager:
     # ------------------------------------------------------------------
 
     def _init_landmarker(self):
-        # Legacy solutions API — avoids the Tasks API remap crash on RPi5.
-        # model_complexity: 0=lite, 1=full, 2=heavy
+        # --- Backend 1: ai-edge-litert + MoveNet (preferred on ARM64) --------
+        if _HAS_LITERT:
+            movenet_path = os.path.join(
+                os.path.dirname(self._config.model_path),
+                "movenet_lightning.tflite",
+            )
+            if os.path.exists(movenet_path):
+                self._landmarker = _MoveNetDetector(movenet_path)
+                logger.info("Pose estimator: MoveNet Lightning (ai-edge-litert) — %s", movenet_path)
+                return
+            else:
+                logger.warning(
+                    "ai-edge-litert available but %s not found. "
+                    "Run: python scripts/download_models.py movenet_lightning.tflite",
+                    movenet_path,
+                )
+
+        # --- Backend 2: MediaPipe legacy solutions API (fallback) ------------
+        if not _HAS_MEDIAPIPE:
+            raise ImportError(
+                "No pose inference backend available.\n"
+                "Install ai-edge-litert and download the MoveNet model:\n"
+                "  pip install ai-edge-litert\n"
+                "  python scripts/download_models.py movenet_lightning.tflite"
+            )
         self._landmarker = mp.solutions.pose.Pose(
             static_image_mode=False,
             model_complexity=1,
@@ -342,7 +470,7 @@ class VisionManager:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        logger.info("Pose estimator ready (mp.solutions.pose, complexity=1).")
+        logger.info("Pose estimator: mp.solutions.pose (complexity=1).")
 
     def _ts_ms(self) -> int:  # kept for potential future VIDEO-mode restoration
         """Monotonically increasing timestamp in milliseconds.
@@ -356,8 +484,8 @@ class VisionManager:
         """Run pose estimation on a BGR frame and return PostureLandmarks."""
         try:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            # Ensure C-contiguous uint8 layout — MJPEG-decoded frames from
-            # v4l2loopback can have strided views that MediaPipe rejects.
+            # Ensure C-contiguous uint8 — MJPEG frames from v4l2loopback can
+            # have strided layouts that confuse both LiteRT and MediaPipe.
             rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
             result = self._landmarker.process(rgb)
         except Exception:
@@ -367,11 +495,14 @@ class VisionManager:
         if not result.pose_landmarks:
             return PostureLandmarks(normalized=[], world=[], is_valid=False)
 
-        # Legacy API returns landmark lists directly (not wrapped in a list-of-poses).
-        # Each landmark has .x, .y, .z, .visibility — same attribute names as the
-        # Tasks API NormalizedLandmark, so posture_logic/math_utils need no changes.
+        # Both backends expose .pose_landmarks.landmark (list with .x/.y/.z/.visibility)
+        # and .pose_world_landmarks (None for MoveNet, set for MediaPipe).
+        world = []
+        if result.pose_world_landmarks is not None:
+            world = result.pose_world_landmarks.landmark
+
         return PostureLandmarks(
             normalized=result.pose_landmarks.landmark,
-            world=result.pose_world_landmarks.landmark if result.pose_world_landmarks else [],
+            world=world,
             is_valid=True,
         )
