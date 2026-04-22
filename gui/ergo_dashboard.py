@@ -114,6 +114,22 @@ class ErgoDashboard:
         self._last_photo: Optional[object] = None   # ImageTk.PhotoImage ref
         self._alert_history: Deque[Tuple[str, int]] = collections.deque(maxlen=50)
 
+        # --- render-skip caches -------------------------------------------
+        # Video: skip PIL/PhotoImage work when the inference thread hasn't
+        #        produced a new frame yet (same object id).
+        self._last_frame_id: int = -1
+
+        # KPIs: only push to tkinter widgets when values change by ≥ 0.5°
+        self._last_severity: int = -1
+        self._last_neck:  float = float("nan")
+        self._last_fhp:   float = float("nan")
+        self._last_asym:  float = float("nan")
+
+        # History: only rebuild the Text widget when a new alert is appended.
+        self._history_version: int = 0
+        self._rendered_history_version: int = -1
+        # ------------------------------------------------------------------
+
         self._root = _App()
         self._root.title("ErgoTrack — Postural Monitor")
         self._root.configure(bg=_FG_COLOR)
@@ -126,11 +142,16 @@ class ErgoDashboard:
     # ------------------------------------------------------------------
 
     def run(self):
-        """Start the 15 FPS update loop and enter the Tkinter main loop."""
+        """Start the GUI update loop (~7 FPS) and enter the Tkinter main loop.
+
+        7 FPS (150 ms interval) is plenty for a posture monitor: the alert
+        state machine requires 10 consecutive bad frames and the camera
+        itself runs at 5 FPS, so the GUI never needs to exceed that rate.
+        """
         self._root.geometry("1200x680")
         self._root.minsize(900, 500)
         self._running = True
-        self._root.after(66, self._update_loop)
+        self._root.after(150, self._update_loop)
         self._root.mainloop()
 
     # ------------------------------------------------------------------
@@ -180,6 +201,21 @@ class ErgoDashboard:
             bg=_PANEL_COLOR, highlightthickness=0,
         )
         self._kpi_canvas.grid(row=1, column=0, padx=10, pady=4, sticky="n")
+
+        # Pre-create canvas items so _draw_gauges can use itemconfig() instead
+        # of delete("all") + recreate — eliminates the most expensive per-frame
+        # canvas work.
+        cx, cy, r = 100, 80, 60
+        x0, y0, x1, y1 = cx - r, cy - r, cx + r, cy + r
+        self._gauge_bg  = self._kpi_canvas.create_arc(
+            x0, y0, x1, y1, start=0, extent=180, outline="#3a3a3c", width=8, style="arc")
+        self._gauge_fg  = self._kpi_canvas.create_arc(
+            x0, y0, x1, y1, start=180, extent=0,
+            outline=_SEVERITY_COLORS[0], width=8, style="arc")
+        self._gauge_val = self._kpi_canvas.create_text(
+            cx, cy + 10, text="0.0\u00b0", fill=_TEXT_COLOR, font=("Helvetica", 11, "bold"))
+        self._gauge_lbl = self._kpi_canvas.create_text(
+            cx, cy + 28, text="Cuello", fill="#8e8e93", font=("Helvetica", 9))
 
         # Status badge
         self._status_label = tk.Label(
@@ -243,7 +279,7 @@ class ErgoDashboard:
         except Exception:
             logger.exception("Dashboard update error.")
         finally:
-            self._root.after(66, self._update_loop)
+            self._root.after(150, self._update_loop)
 
     def _render(self, frame: Optional[np.ndarray], report):
         self._render_video(frame, report)
@@ -258,7 +294,7 @@ class ErgoDashboard:
         if not _HAS_PIL:
             return
 
-        # Show a "no signal" placeholder when the camera gives no frame
+        # --- no-signal placeholder ------------------------------------------
         if frame is None:
             if not hasattr(self, "_no_signal_frame"):
                 placeholder = np.zeros((_DISPLAY_H, _DISPLAY_W, 3), dtype=np.uint8)
@@ -266,31 +302,35 @@ class ErgoDashboard:
                 cv2.putText(placeholder, "No camera signal", (40, _DISPLAY_H // 2),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120, 120, 120), 1, cv2.LINE_AA)
                 self._no_signal_frame = placeholder
-            pil_img = Image.fromarray(self._no_signal_frame)
-            photo = ImageTk.PhotoImage(pil_img)
-            self._last_photo = photo
-            self._video_label.configure(image=photo, text="")
+            if self._last_frame_id != -2:   # draw placeholder once
+                pil_img = Image.fromarray(self._no_signal_frame)
+                photo = ImageTk.PhotoImage(pil_img)
+                self._last_photo = photo
+                self._video_label.configure(image=photo, text="")
+                self._last_frame_id = -2
             return
+
+        # --- skip render if the inference thread hasn't produced a new frame --
+        fid = id(frame)
+        if fid == self._last_frame_id:
+            return   # same numpy array — PIL/PhotoImage conversion not needed
+        self._last_frame_id = fid
+
+        # Work on a copy so we never mutate the shared inference-thread buffer.
+        frame = frame.copy()
 
         h_orig, w_orig = frame.shape[:2]
         color = _SEVERITY_COLORS.get(int(report.severity), "#ffffff")
         bgr_color = _hex_to_bgr(color)
 
-        # Draw landmark overlay at original resolution
-        if report.severity.value > 0 or True:   # always draw skeleton
-            self._draw_overlay(frame, report, w_orig, h_orig, bgr_color)
+        self._draw_overlay(frame, report, w_orig, h_orig, bgr_color)
 
-        # Downscale for display
+        # Downscale for display then add severity border
         display = cv2.resize(frame, (_DISPLAY_W, _DISPLAY_H), interpolation=cv2.INTER_LINEAR)
-
-        # Border colour by severity
-        border_w = 4
-        cv2.rectangle(display, (0, 0), (_DISPLAY_W - 1, _DISPLAY_H - 1),
-                      bgr_color, border_w)
+        cv2.rectangle(display, (0, 0), (_DISPLAY_W - 1, _DISPLAY_H - 1), bgr_color, 4)
 
         rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
-        photo = ImageTk.PhotoImage(pil_img)
+        photo = ImageTk.PhotoImage(Image.fromarray(rgb))
         self._last_photo = photo   # prevent GC
         self._video_label.configure(image=photo, text="")
 
@@ -317,61 +357,70 @@ class ErgoDashboard:
             pass
 
     def _render_kpis(self, report):
-        level = int(report.severity)
-        color = _SEVERITY_COLORS[level]
+        level  = int(report.severity)
+        neck   = report.neck_flexion_deg
+        fhp    = report.fhp_ratio
+        asym   = report.shoulder_asymmetry_deg
 
-        self._status_label.configure(
-            text=f"Status: {report.severity.name}", fg=color)
-        self._neck_label.configure(
-            text=f"{report.neck_flexion_deg:.1f}°", fg=color if level > 0 else _TEXT_COLOR)
-        self._fhp_label.configure(
-            text=f"{report.fhp_ratio:.3f}", fg=color if level > 0 else _TEXT_COLOR)
-        self._asym_label.configure(
-            text=f"{report.shoulder_asymmetry_deg:.1f}°", fg=color if level > 0 else _TEXT_COLOR)
+        # Skip all KPI widget updates if nothing has changed enough to matter.
+        # 0.5° / 0.005 is below the visual resolution of the text labels.
+        if (level == self._last_severity
+                and abs(neck - self._last_neck) < 0.5
+                and abs(fhp  - self._last_fhp)  < 0.005
+                and abs(asym - self._last_asym)  < 0.5):
+            return
+
+        self._last_severity = level
+        self._last_neck = neck
+        self._last_fhp  = fhp
+        self._last_asym = asym
+
+        color = _SEVERITY_COLORS[level]
+        val_color = color if level > 0 else _TEXT_COLOR
+
+        self._status_label.configure(text=f"Status: {report.severity.name}", fg=color)
+        self._neck_label.configure(text=f"{neck:.1f}\u00b0",  fg=val_color)
+        self._fhp_label.configure( text=f"{fhp:.3f}",         fg=val_color)
+        self._asym_label.configure(text=f"{asym:.1f}\u00b0",  fg=val_color)
 
         self._draw_gauges(report)
 
     def _draw_gauges(self, report):
-        c = self._kpi_canvas
-        c.delete("all")
-        cx, cy, r = 100, 80, 60
-
-        def arc(cx, cy, r, value, max_val, color):
-            angle = min(value / max_val, 1.0) * 180
-            x0, y0 = cx - r, cy - r
-            x1, y1 = cx + r, cy + r
-            # Background arc
-            c.create_arc(x0, y0, x1, y1, start=0, extent=180,
-                         outline="#3a3a3c", width=8, style="arc")
-            if angle > 0:
-                c.create_arc(x0, y0, x1, y1, start=180 - angle, extent=angle,
-                             outline=color, width=8, style="arc")
-
-        level = int(report.severity)
-        clr = _SEVERITY_COLORS[level]
-
-        arc(cx, cy, r,
-            value=report.neck_flexion_deg,
-            max_val=60.0, color=clr)
-        c.create_text(cx, cy + 10, text=f"{report.neck_flexion_deg:.1f}°",
-                      fill=_TEXT_COLOR, font=("Helvetica", 11, "bold"))
-        c.create_text(cx, cy + 28, text="Neck", fill="#8e8e93", font=("Helvetica", 9))
+        """Update the canvas gauge via itemconfig — no delete/recreate."""
+        clr   = _SEVERITY_COLORS[int(report.severity)]
+        angle = min(report.neck_flexion_deg / 60.0, 1.0) * 180
+        self._kpi_canvas.itemconfig(
+            self._gauge_fg,
+            start=180 - angle, extent=max(angle, 0.01),   # extent=0 hides arc
+            outline=clr,
+        )
+        self._kpi_canvas.itemconfig(
+            self._gauge_val,
+            text=f"{report.neck_flexion_deg:.1f}\u00b0",
+        )
 
     def _render_history(self, report):
         level = int(report.severity)
         color = _SEVERITY_COLORS[level]
+
         if level > 0:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             entry = (f"{ts}  {report.severity.name:7s}  {report.dominant_issue}\n",
                      f"level{level}")
             self._alert_history.append(entry)
+            self._history_version += 1
 
-        self._history_text.configure(state="normal")
-        self._history_text.delete("1.0", "end")
-        for text, tag in list(self._alert_history)[-20:]:
-            self._history_text.insert("end", text, tag)
-        self._history_text.see("end")
-        self._history_text.configure(state="disabled")
+        # Only rebuild the Text widget when the history actually changed.
+        # Rebuilding on every frame (even with no new alerts) was one of the
+        # most expensive per-cycle tkinter operations.
+        if self._history_version != self._rendered_history_version:
+            self._history_text.configure(state="normal")
+            self._history_text.delete("1.0", "end")
+            for text, tag in list(self._alert_history)[-20:]:
+                self._history_text.insert("end", text, tag)
+            self._history_text.see("end")
+            self._history_text.configure(state="disabled")
+            self._rendered_history_version = self._history_version
 
         self._current_label.configure(
             text=f"Current: {report.severity.name}", fg=color)
