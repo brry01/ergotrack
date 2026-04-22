@@ -275,6 +275,7 @@ class ErgoDashboard:
             frame, landmarks = self._vm.capture_with_frame()
             report = self._pl.analyze(landmarks)
             self._hw.trigger_alert(report.severity)
+            self._hw.update_oled(report)   # throttled internally to ≤1 Hz
             self._render(frame, report)
         except Exception:
             logger.exception("Dashboard update error.")

@@ -77,10 +77,14 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _BUZZER_FREQ_HZ = 2000
 _BUZZER_PATTERNS = {
-    AlertLevel.LEVEL1: (100, 1),
-    AlertLevel.LEVEL2: (100, 2),
-    AlertLevel.LEVEL3: (300, 3),
+    AlertLevel.LEVEL1: (100, 1),   # 1 short beep
+    AlertLevel.LEVEL2: (100, 2),   # 2 short beeps
+    AlertLevel.LEVEL3: (300, 3),   # 3 long beeps
 }
+
+# OLED is updated at most this often (seconds).  I2C transfers at 100 kHz
+# take ~100 ms for a 128×64 frame — too slow to call every inference cycle.
+_OLED_MIN_INTERVAL_S = 2.0
 
 
 class HardwareController:
@@ -101,6 +105,7 @@ class HardwareController:
         self._pwm = None
         self._oled = None
         self._buzzer_lock = threading.Lock()
+        self._last_oled_t: float = 0.0    # monotonic timestamp of last OLED paint
 
         if self._sim_mode:
             logger.info("HardwareController: simulation mode active.")
@@ -135,9 +140,18 @@ class HardwareController:
             ).start()
 
     def update_oled(self, report: PostureReport):
-        """Render a PostureReport summary to the OLED display."""
+        """Render a PostureReport summary to the OLED display.
+
+        Internally throttled to at most once every ``_OLED_MIN_INTERVAL_S``
+        seconds — I2C transfers take ~100 ms and must not block the main loop
+        on every inference cycle.  Safe to call on every frame.
+        """
         if self._sim_mode or self._oled is None or not _HAS_PIL:
             return
+        now = time.monotonic()
+        if now - self._last_oled_t < _OLED_MIN_INTERVAL_S:
+            return
+        self._last_oled_t = now
         try:
             self._render_oled(report)
         except Exception:

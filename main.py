@@ -174,6 +174,7 @@ def run_headless(vm, pl: PostureLogic, hw: HardwareController,
             landmarks = vm.capture_and_detect()
             report = pl.analyze(landmarks)
             hw.trigger_alert(report.severity)
+            hw.update_oled(report)        # throttled internally to ≤1 Hz
 
             if monitor:
                 # Coloured terminal display — replaces per-frame log entries
