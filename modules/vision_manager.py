@@ -314,6 +314,7 @@ class VisionManager:
         self._use_picamera2 = False
         self._use_gstreamer = False
         self._use_rpicam = False
+        self._frame_is_rgb = False   # True when camera delivers RGB (not BGR)
         self._landmarker: Optional[PoseLandmarker] = None
         self._start_ns = time.perf_counter_ns()
 
@@ -398,6 +399,14 @@ class VisionManager:
     # Background inference loop
     # ------------------------------------------------------------------
 
+    # Run pose inference on 1 out of every _INFER_EVERY_N captured frames.
+    # This caps inference rate independently of camera FPS and spreads CPU
+    # headroom across other threads (GUI, thermal guard, OS scheduler).
+    # At 5 FPS camera with _INFER_EVERY_N=2: inference runs at ~2.5 Hz.
+    # Alert at bad_frame_threshold=10 fires in ≈4 s — acceptable for posture.
+    # Set to 1 to run inference on every captured frame.
+    _INFER_EVERY_N: int = 2
+
     def _inference_loop(self):
         """Continuously capture frames and run pose inference.
 
@@ -407,34 +416,54 @@ class VisionManager:
         Design notes
         ------------
         * ``_inf_frame`` is updated *before* inference so the video panel
-          refreshes at camera FPS (10 Hz) even while inference runs at its
-          own pace (~3–5 Hz on RPi5).
+          refreshes at camera FPS (5 Hz) even while inference runs at a
+          lower rate controlled by ``_INFER_EVERY_N``.
         * Same-frame deduplication: inference is skipped when the camera
-          hasn't produced a new frame yet, avoiding wasted CPU cycles when
-          the inference loop is faster than the camera.
+          hasn't produced a new frame yet, avoiding wasted CPU when
+          inference outpaces the camera.
+        * Explicit frame-count skip (``_INFER_EVERY_N``): runs inference
+          every Nth unique frame regardless of timing, capping CPU usage.
+        * RGB-aware display: when picamera2 is used with RGB888 format the
+          raw frame is already RGB; we convert to BGR only for the GUI
+          (which expects BGR) instead of converting both directions.
         """
         _last_frame_id: int = -1   # id() of the last frame we ran inference on
+        _frame_count: int = 0      # counts unique frames for _INFER_EVERY_N
 
         while not self._inf_stop.is_set():
-            frame_bgr = self._grab_frame()
-            if frame_bgr is None:
+            frame_raw = self._grab_frame()   # BGR for most backends; RGB for picamera2
+            if frame_raw is None:
                 time.sleep(0.05)
                 continue
 
-            # ── 1. Always push the latest frame to the GUI immediately ──────
+            # ── 1. Prepare BGR display frame ─────────────────────────────────
+            # _inf_frame is always stored as BGR so the GUI's cvtColor works
+            # uniformly.  For picamera2 RGB888 the conversion is RGB→BGR here
+            # (one conversion) instead of BGR→RGB inside _detect (also one
+            # conversion) — same cost, but _detect can now skip its conversion.
+            if self._frame_is_rgb:
+                frame_bgr = cv2.cvtColor(frame_raw, cv2.COLOR_RGB2BGR)
+            else:
+                frame_bgr = frame_raw
+
+            # ── 2. Always push latest frame to GUI immediately ───────────────
             with self._inf_lock:
                 self._inf_frame = frame_bgr
 
-            # ── 2. Skip inference if the camera hasn't delivered a new frame ─
-            fid = id(frame_bgr)
+            # ── 3. Skip inference if camera hasn't delivered a new frame ─────
+            fid = id(frame_raw)
             if fid == _last_frame_id:
-                # Inference is faster than the camera; yield briefly and wait.
-                time.sleep(0.02)
+                time.sleep(0.02)   # yield; inference outpacing camera
                 continue
             _last_frame_id = fid
+            _frame_count += 1
 
-            # ── 3. Run inference and update landmark cache ───────────────────
-            landmarks = self._detect(frame_bgr)
+            # ── 4. Skip inference every _INFER_EVERY_N - 1 out of N frames ──
+            if _frame_count % self._INFER_EVERY_N != 0:
+                continue
+
+            # ── 5. Run inference (uses raw frame to avoid double-conversion) ─
+            landmarks = self._detect(frame_raw)
             with self._inf_lock:
                 self._inf_landmarks = landmarks
 
@@ -470,13 +499,18 @@ class VisionManager:
         if _HAS_PICAMERA2:
             try:
                 self._camera = Picamera2()
+                # Use RGB888 instead of BGR888: capture_array() gives us the frame
+                # already in the format MoveNet needs, eliminating the BGR→RGB
+                # conversion in _detect().  The GUI's cvtColor(BGR) call is updated
+                # to handle RGB via the _frame_is_rgb flag.
                 cam_cfg = self._camera.create_preview_configuration(
-                    main={"size": (w, h), "format": "BGR888"}
+                    main={"size": (w, h), "format": "RGB888"}
                 )
                 self._camera.configure(cam_cfg)
                 self._camera.start()
                 self._use_picamera2 = True
-                logger.info("Camera: picamera2 (%dx%d).", w, h)
+                self._frame_is_rgb = True
+                logger.info("Camera: picamera2 RGB888 (%dx%d).", w, h)
                 return
             except Exception:
                 logger.exception("picamera2 init failed — falling back to OpenCV.")
@@ -681,10 +715,22 @@ class VisionManager:
         """
         return (time.perf_counter_ns() - self._start_ns) // 1_000_000
 
-    def _detect(self, frame_bgr: np.ndarray) -> PostureLandmarks:
-        """Run pose estimation on a BGR frame and return PostureLandmarks."""
+    def _detect(self, frame: np.ndarray) -> PostureLandmarks:
+        """Run pose estimation and return PostureLandmarks.
+
+        Parameters
+        ----------
+        frame:
+            BGR frame for most camera backends; RGB when ``_frame_is_rgb``
+            is True (picamera2 RGB888 path).  The function checks the flag
+            and skips the color conversion when the frame is already RGB,
+            saving one cvtColor call per inference cycle.
+        """
         try:
-            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            if self._frame_is_rgb:
+                rgb = frame   # already RGB — no conversion needed
+            else:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             # Ensure C-contiguous uint8 — MJPEG frames from v4l2loopback can
             # have strided layouts that confuse both LiteRT and MediaPipe.
             rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
