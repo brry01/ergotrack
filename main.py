@@ -37,6 +37,7 @@ from modules.config_profile import ConfigProfile
 from modules.hardware_controller import HardwareController
 from modules.posture_logic import AlertLevel, PostureLogic, PostureReport
 from utils.thermal_guard import ThermalGuard
+from utils.terminal_display import TerminalMonitor
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", default="cycling",
                         choices=["good", "mild_fhp", "severe_neck", "shoulder_tilt", "cycling"],
                         help="Simulator scenario (default: cycling)")
+    parser.add_argument("--monitor", action="store_true",
+                        help="Print live coloured metrics to the terminal (headless mode only)")
     return parser.parse_args()
 
 
@@ -127,7 +130,16 @@ def write_csv_row(writer, report: PostureReport):
 # ---------------------------------------------------------------------------
 
 def run_headless(vm, pl: PostureLogic, hw: HardwareController,
-                 config: ConfigProfile, thermal: ThermalGuard):
+                 config: ConfigProfile, thermal: ThermalGuard,
+                 monitor=None):
+    """Main headless loop.
+
+    Parameters
+    ----------
+    monitor:
+        Optional ``TerminalMonitor`` instance.  When provided, each cycle
+        prints a coloured metric line instead of the plain INFO log entry.
+    """
     logger = logging.getLogger("headless")
     frame_interval = 1.0 / config.vision.fps
 
@@ -136,7 +148,10 @@ def run_headless(vm, pl: PostureLogic, hw: HardwareController,
         csv_file, csv_writer = init_csv(config.logging.csv_path)
         logger.info("CSV logging → %s", config.logging.csv_path)
 
-    logger.info("ErgoTrack headless mode started. Press Ctrl+C to stop.")
+    if monitor:
+        logger.info("ErgoTrack monitor mode — Ctrl+C para salir.")
+    else:
+        logger.info("ErgoTrack headless mode started. Press Ctrl+C to stop.")
 
     _last_throttle_log: float = 0.0   # timestamp of last throttle warning
 
@@ -151,7 +166,7 @@ def run_headless(vm, pl: PostureLogic, hw: HardwareController,
             if thermal.should_throttle:
                 now = time.perf_counter()
                 if now - _last_throttle_log >= 30.0:
-                    logger.warning("ThermalGuard: CPU hot — throttling until cool.")
+                    logger.warning("ThermalGuard: CPU caliente — esperando.")
                     _last_throttle_log = now
                 time.sleep(2.0)
                 continue
@@ -160,7 +175,10 @@ def run_headless(vm, pl: PostureLogic, hw: HardwareController,
             report = pl.analyze(landmarks)
             hw.trigger_alert(report.severity)
 
-            if report.is_bad_posture:
+            if monitor:
+                # Coloured terminal display — replaces per-frame log entries
+                monitor.update(report)
+            elif report.is_bad_posture:
                 logger.info(
                     "BAD POSTURE | %s | neck=%.1f° fhp=%.3f asym=%.1f°",
                     report.severity.name,
@@ -278,7 +296,8 @@ def main():
             else:
                 vm = vm_real
 
-            run_headless(vm, pl, hw, config, thermal)
+            monitor = TerminalMonitor(config.thresholds) if args.monitor else None
+            run_headless(vm, pl, hw, config, thermal, monitor=monitor)
 
     finally:
         thermal.stop()
