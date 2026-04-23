@@ -13,8 +13,9 @@ thresholds:
 
 hardware:
   buzzer_pin: 18
-  led_pin: 24
-  oled_address: "0x3C"          # quoted string — parsed with int(str(v), 16)
+  buzzer_active: true    # true = buzzer activo (oscilador interno, solo DC)
+                         # false = buzzer pasivo (necesita PWM 2 kHz)
+  oled_address: "0x3C"  # quoted string — parsed with int(str(v), 16)
   oled_width: 128
   oled_height: 64
 

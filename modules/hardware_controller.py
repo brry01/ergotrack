@@ -1,13 +1,17 @@
-"""Hardware output controller: GPIO, OLED display, buzzer, and status LED.
+"""Hardware output controller: GPIO buzzer/motor + OLED display.
 
 Auto-detects available hardware at import time.  If GPIO or OLED libraries
 are absent (e.g., on a development PC), the controller transparently enters
 Simulation Mode and prints alerts to stdout instead.
 
 Real hardware wiring (RPi5):
-  - LED:    GPIO led_pin (BCM numbering)
-  - Buzzer: GPIO buzzer_pin (BCM) — PWM at 2 kHz
-  - OLED:   I2C SSD1306 128×64 at address 0x3C (I2C bus 1)
+  - Buzzer / vibration motor: GPIO buzzer_pin (BCM 18)
+  - OLED: I2C SSD1306 128×64 at address 0x3C (I2C bus 1)
+
+Buzzer types (set buzzer_active in config/default.yaml):
+  buzzer_active: true  — active buzzer / vibration motor: driven with DC
+                         HIGH/LOW.  The device has an internal oscillator.
+  buzzer_active: false — passive buzzer: driven with 2 kHz PWM.
 
 GPIO library priority (RPi OS Bookworm):
   1. RPi.GPIO  — works on RPi5 via the lgpio backend included in RPi OS
@@ -15,7 +19,6 @@ GPIO library priority (RPi OS Bookworm):
   Simulation mode activates automatically when neither is available (PC).
 
 OLED library: luma.oled (pip install luma.oled)
-  Simpler than adafruit-circuitpython-ssd1306; no Blinka layer required.
 """
 from __future__ import annotations
 
@@ -102,10 +105,10 @@ class HardwareController:
     def __init__(self, config: HardwareConfig, sim_mode: bool = False):
         self._config = config
         self._sim_mode: bool = sim_mode or not (_HAS_GPIO or _HAS_OLED)
-        self._pwm = None
+        self._pwm = None          # only used when buzzer_active=False (passive buzzer)
         self._oled = None
         self._buzzer_lock = threading.Lock()
-        self._last_oled_t: float = 0.0    # monotonic timestamp of last OLED paint
+        self._last_oled_t: float = 0.0
 
         if self._sim_mode:
             logger.info("HardwareController: simulation mode active.")
@@ -125,13 +128,10 @@ class HardwareController:
             return
 
         if level == AlertLevel.OK:
-            self._led_off()
             return
 
-        self._led_on()
-
         pattern = _BUZZER_PATTERNS.get(level)
-        if pattern and self._pwm is not None:
+        if pattern:
             duration_ms, count = pattern
             threading.Thread(
                 target=self._beep,
@@ -164,9 +164,9 @@ class HardwareController:
         try:
             if self._pwm is not None:
                 self._pwm.stop()
-                self._pwm = None   # prevent PWM.__del__ from calling stop() again
-                                   # after GPIO.cleanup() has freed the lgpio handle
+                self._pwm = None
             if _HAS_GPIO and _GPIO is not None:
+                _GPIO.output(self._config.buzzer_pin, _GPIO.LOW)   # ensure off
                 _GPIO.cleanup()
         except Exception:
             logger.exception("GPIO cleanup error.")
@@ -181,42 +181,45 @@ class HardwareController:
         try:
             _GPIO.setmode(_GPIO.BCM)
             _GPIO.setwarnings(False)
-            _GPIO.setup(self._config.led_pin, _GPIO.OUT, initial=_GPIO.LOW)
             _GPIO.setup(self._config.buzzer_pin, _GPIO.OUT, initial=_GPIO.LOW)
-            self._pwm = _GPIO.PWM(self._config.buzzer_pin, _BUZZER_FREQ_HZ)
-            logger.info("GPIO initialised (LED=BCM%d, Buzzer=BCM%d).",
-                        self._config.led_pin, self._config.buzzer_pin)
+
+            if not self._config.buzzer_active:
+                # Passive buzzer — needs PWM to produce a tone
+                self._pwm = _GPIO.PWM(self._config.buzzer_pin, _BUZZER_FREQ_HZ)
+
+            btype = "activo" if self._config.buzzer_active else f"pasivo {_BUZZER_FREQ_HZ} Hz"
+            logger.info("GPIO initialised — Buzzer BCM%d (%s).",
+                        self._config.buzzer_pin, btype)
         except Exception:
             logger.exception("GPIO init failed — outputs disabled.")
             self._pwm = None
 
-    def _led_on(self):
-        if _HAS_GPIO and _GPIO is not None:
-            try:
-                _GPIO.output(self._config.led_pin, _GPIO.HIGH)
-            except Exception:
-                pass
-
-    def _led_off(self):
-        if _HAS_GPIO and _GPIO is not None:
-            try:
-                _GPIO.output(self._config.led_pin, _GPIO.LOW)
-            except Exception:
-                pass
-
     def _beep(self, duration_ms: int, count: int):
-        """Emit a buzzer pattern. Runs in a background thread to avoid
-        blocking the 15 FPS main loop."""
+        """Emit a buzzer/motor pattern in a background thread.
+
+        Active buzzer / vibration motor (buzzer_active=True):
+            Driven with GPIO HIGH/LOW — the device generates its own tone.
+        Passive buzzer (buzzer_active=False):
+            Driven with 2 kHz PWM — the GPIO signal creates the tone.
+        """
         with self._buzzer_lock:
-            if self._pwm is None:
-                return
+            dur = duration_ms / 1000.0
             for i in range(count):
                 try:
-                    self._pwm.start(50)              # 50% duty cycle → audible tone
-                    time.sleep(duration_ms / 1000.0)
-                    self._pwm.stop()
+                    if self._config.buzzer_active:
+                        # Active buzzer / motor: simple DC on/off
+                        _GPIO.output(self._config.buzzer_pin, _GPIO.HIGH)
+                        time.sleep(dur)
+                        _GPIO.output(self._config.buzzer_pin, _GPIO.LOW)
+                    else:
+                        # Passive buzzer: PWM tone
+                        if self._pwm is None:
+                            return
+                        self._pwm.start(50)
+                        time.sleep(dur)
+                        self._pwm.stop()
                     if i < count - 1:
-                        time.sleep(0.08)             # gap between beeps
+                        time.sleep(0.08)   # gap between beeps
                 except Exception:
                     logger.exception("Buzzer error.")
                     break
