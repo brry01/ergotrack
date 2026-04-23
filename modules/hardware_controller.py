@@ -227,6 +227,11 @@ class HardwareController:
 
     def _init_oled(self):
         if not (_HAS_OLED and _luma_i2c and _luma_ssd1306):
+            if not _HAS_OLED:
+                logger.warning(
+                    "luma.oled not installed — OLED disabled. "
+                    "Fix: pip install luma.oled"
+                )
             return
         try:
             serial = _luma_i2c(port=1, address=self._config.oled_address)
@@ -235,20 +240,29 @@ class HardwareController:
                 width=self._config.oled_width,
                 height=self._config.oled_height,
             )
-            logger.info("OLED initialised (SSD1306 at 0x%02X).",
+            logger.info("OLED initialised (SSD1306 128×64 at I2C 0x%02X).",
                         self._config.oled_address)
         except Exception as exc:
-            # DeviceNotFoundError → no OLED physically connected; warn and continue.
-            # Any other exception is unexpected → log at ERROR.
             exc_name = type(exc).__name__
-            if "DeviceNotFoundError" in exc_name or "Remote I/O" in str(exc):
+            exc_str  = str(exc)
+            if "DeviceNotFoundError" in exc_name or "Remote I/O" in exc_str:
                 logger.warning(
-                    "OLED not found at 0x%02X — running without display. "
-                    "Connect an SSD1306 and reboot if needed.",
+                    "OLED not found at 0x%02X on I2C bus 1. "
+                    "Check wiring and run: python scripts/test_oled.py",
                     self._config.oled_address,
                 )
+            elif "Permission" in exc_str or "Access" in exc_str:
+                logger.error(
+                    "OLED I2C permission denied. "
+                    "Fix: sudo usermod -aG i2c %s  (then re-login)",
+                    __import__("os").getenv("USER", "$USER"),
+                )
             else:
-                logger.exception("OLED init failed unexpectedly — display disabled.")
+                logger.error(
+                    "OLED init failed: %s: %s — run scripts/test_oled.py "
+                    "for full diagnosis.",
+                    exc_name, exc_str,
+                )
             self._oled = None
 
     def _render_oled(self, report: PostureReport):
