@@ -1,12 +1,13 @@
-"""Diagnóstico completo de hardware — GPIO, buzzer, motor, OLED.
+"""Diagnóstico completo de hardware — GPIO buzzer/motor + OLED.
 
 Corre ANTES de ErgoTrack para confirmar que todo el hardware
 responde correctamente.
 
 Uso:
-    python scripts/test_hardware.py           # prueba todo
-    python scripts/test_hardware.py --gpio    # solo GPIO / buzzer / motor
-    python scripts/test_hardware.py --oled    # solo OLED
+    python scripts/test_hardware.py                    # prueba todo
+    python scripts/test_hardware.py --gpio             # solo buzzer/motor
+    python scripts/test_hardware.py --oled             # solo OLED
+    python scripts/test_hardware.py --passive-buzzer   # buzzer pasivo (PWM)
 """
 from __future__ import annotations
 import argparse, os, sys, time, shutil, subprocess
@@ -14,8 +15,9 @@ import argparse, os, sys, time, shutil, subprocess
 parser = argparse.ArgumentParser()
 parser.add_argument("--gpio", action="store_true")
 parser.add_argument("--oled", action="store_true")
+parser.add_argument("--passive-buzzer", action="store_true",
+                    help="Tratar buzzer como pasivo (PWM 2kHz) en vez de activo (DC)")
 # pines configurables (deben coincidir con config/default.yaml)
-parser.add_argument("--led-pin",    type=int, default=24)
 parser.add_argument("--buzzer-pin", type=int, default=18)
 parser.add_argument("--oled-addr",  default="0x3C")
 parser.add_argument("--i2c-bus",    type=int, default=1)
@@ -75,15 +77,14 @@ if run_oled:
         )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2.  GPIO  (LED + Buzzer/Motor)
+# 2.  GPIO  (Buzzer / Motor de vibración)
 # ══════════════════════════════════════════════════════════════════════════════
 if run_gpio:
-    hdr("2 ─ GPIO")
+    hdr("2 ─ GPIO — Buzzer / Motor (BCM {})".format(args.buzzer_pin))
 
     if GPIO is None:
         warn("Omitido — RPi.GPIO no disponible")
     else:
-        # Permisos
         gpiomem = "/dev/gpiomem"
         if os.access(gpiomem, os.R_OK | os.W_OK):
             ok(f"{gpiomem} accesible")
@@ -96,38 +97,38 @@ if run_gpio:
         try:
             GPIO.setmode(GPIO.BCM)
             GPIO.setwarnings(False)
-
-            # ── LED ──────────────────────────────────────────────────────────
-            hdr("  2a ─ LED (BCM {})".format(args.led_pin))
-            GPIO.setup(args.led_pin, GPIO.OUT, initial=GPIO.LOW)
-            print(f"     Encendiendo LED 3 veces (pin BCM {args.led_pin})…")
-            for _ in range(3):
-                GPIO.output(args.led_pin, GPIO.HIGH); time.sleep(0.3)
-                GPIO.output(args.led_pin, GPIO.LOW);  time.sleep(0.2)
-            ok("LED pulsado — ¿lo viste parpadear?")
-
-            # ── Buzzer / Motor de vibración ───────────────────────────────────
-            hdr("  2b ─ Buzzer / Motor (BCM {})".format(args.buzzer_pin))
             GPIO.setup(args.buzzer_pin, GPIO.OUT, initial=GPIO.LOW)
-            pwm = GPIO.PWM(args.buzzer_pin, 2000)   # 2 kHz para buzzer pasivo
-            print(f"     Patrón LEVEL2 (2 bips) en pin BCM {args.buzzer_pin}…")
-            for _ in range(2):
-                pwm.start(50); time.sleep(0.1)
-                pwm.stop();    time.sleep(0.08)
-            time.sleep(0.3)
-            ok("Patrón enviado — ¿escuchaste / sentiste la vibración?")
 
-            # ── DC puro para motor de vibración ──────────────────────────────
-            print("     DC continuo 1 s para motor de vibración…")
-            GPIO.output(args.buzzer_pin, GPIO.HIGH)
-            time.sleep(1.0)
-            GPIO.output(args.buzzer_pin, GPIO.LOW)
-            ok("DC enviado — ¿vibró el motor?")
+            if args.passive_buzzer:
+                # ── Buzzer pasivo: PWM 2 kHz ──────────────────────────────
+                hdr("  Modo: buzzer PASIVO (PWM 2 kHz)")
+                pwm = GPIO.PWM(args.buzzer_pin, 2000)
+                print("     Patrón LEVEL2 (2 bips PWM)…")
+                for _ in range(2):
+                    pwm.start(50); time.sleep(0.15)
+                    pwm.stop();    time.sleep(0.1)
+                ok("Patrón PWM enviado — ¿escuchaste el tono?")
+            else:
+                # ── Buzzer activo / Motor: DC HIGH/LOW ────────────────────
+                hdr("  Modo: buzzer ACTIVO / motor (DC)")
+                print("     Patrón LEVEL2 (2 pulsos DC)…")
+                for _ in range(2):
+                    GPIO.output(args.buzzer_pin, GPIO.HIGH); time.sleep(0.15)
+                    GPIO.output(args.buzzer_pin, GPIO.LOW);  time.sleep(0.1)
+                time.sleep(0.3)
+                ok("Patrón DC enviado — ¿sonó / vibró?")
+
+                print("     DC continuo 1 s…")
+                GPIO.output(args.buzzer_pin, GPIO.HIGH)
+                time.sleep(1.0)
+                GPIO.output(args.buzzer_pin, GPIO.LOW)
+                ok("¿Sonó / vibró durante 1 segundo?")
 
         except Exception as exc:
             all_ok = fail(f"Error GPIO: {exc}")
         finally:
             try:
+                GPIO.output(args.buzzer_pin, GPIO.LOW)
                 GPIO.cleanup()
             except Exception:
                 pass
