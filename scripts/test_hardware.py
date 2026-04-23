@@ -17,6 +17,8 @@ parser.add_argument("--gpio", action="store_true")
 parser.add_argument("--oled", action="store_true")
 parser.add_argument("--passive-buzzer", action="store_true",
                     help="Tratar buzzer como pasivo (PWM 2kHz) en vez de activo (DC)")
+parser.add_argument("--invert-buzzer", action="store_true",
+                    help="Lógica invertida: LOW=ON, HIGH=OFF (módulos active-low)")
 # pines configurables (deben coincidir con config/default.yaml)
 parser.add_argument("--buzzer-pin", type=int, default=18)
 parser.add_argument("--oled-addr",  default="0x3C")
@@ -85,19 +87,35 @@ if run_gpio:
     if GPIO is None:
         warn("Omitido — RPi.GPIO no disponible")
     else:
-        gpiomem = "/dev/gpiomem"
-        if os.access(gpiomem, os.R_OK | os.W_OK):
-            ok(f"{gpiomem} accesible")
+        # RPi5 usa /dev/gpiochip4 (lgpio), no /dev/gpiomem.
+        # Detectamos el dispositivo correcto según el hardware.
+        gpio_dev = None
+        for dev in ["/dev/gpiochip4", "/dev/gpiochip0", "/dev/gpiomem"]:
+            if os.path.exists(dev):
+                gpio_dev = dev
+                break
+
+        if gpio_dev and os.access(gpio_dev, os.R_OK | os.W_OK):
+            ok(f"{gpio_dev} accesible")
         else:
-            all_ok = fail(
-                f"{gpiomem} sin permisos.\n"
-                "     Fix: sudo usermod -aG gpio $USER  (luego cerrar sesión)"
+            warn(
+                f"Sin acceso a {gpio_dev or 'dispositivo GPIO'}.\n"
+                "     Si el test falla, corre con: sudo python scripts/test_hardware.py --gpio\n"
+                "     Fix permanente: sudo usermod -aG gpio $USER  (luego cerrar sesión)"
             )
+
+        # Lógica ON/OFF según modo
+        if args.invert_buzzer:
+            ON, OFF = GPIO.LOW, GPIO.HIGH
+            idle = GPIO.HIGH
+        else:
+            ON, OFF = GPIO.HIGH, GPIO.LOW
+            idle = GPIO.LOW
 
         try:
             GPIO.setmode(GPIO.BCM)
             GPIO.setwarnings(False)
-            GPIO.setup(args.buzzer_pin, GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(args.buzzer_pin, GPIO.OUT, initial=idle)
 
             if args.passive_buzzer:
                 # ── Buzzer pasivo: PWM 2 kHz ──────────────────────────────
@@ -107,28 +125,31 @@ if run_gpio:
                 for _ in range(2):
                     pwm.start(50); time.sleep(0.15)
                     pwm.stop();    time.sleep(0.1)
+                pwm.stop()
                 ok("Patrón PWM enviado — ¿escuchaste el tono?")
             else:
                 # ── Buzzer activo / Motor: DC HIGH/LOW ────────────────────
-                hdr("  Modo: buzzer ACTIVO / motor (DC)")
-                print("     Patrón LEVEL2 (2 pulsos DC)…")
+                inv_note = " [lógica invertida: LOW=ON]" if args.invert_buzzer else ""
+                hdr(f"  Modo: buzzer ACTIVO / motor (DC){inv_note}")
+
+                print("     Patrón LEVEL2 (2 pulsos)…")
                 for _ in range(2):
-                    GPIO.output(args.buzzer_pin, GPIO.HIGH); time.sleep(0.15)
-                    GPIO.output(args.buzzer_pin, GPIO.LOW);  time.sleep(0.1)
+                    GPIO.output(args.buzzer_pin, ON);  time.sleep(0.2)
+                    GPIO.output(args.buzzer_pin, OFF); time.sleep(0.1)
                 time.sleep(0.3)
-                ok("Patrón DC enviado — ¿sonó / vibró?")
+                ok("Patrón enviado — ¿sonó / vibró?")
 
                 print("     DC continuo 1 s…")
-                GPIO.output(args.buzzer_pin, GPIO.HIGH)
+                GPIO.output(args.buzzer_pin, ON)
                 time.sleep(1.0)
-                GPIO.output(args.buzzer_pin, GPIO.LOW)
+                GPIO.output(args.buzzer_pin, OFF)
                 ok("¿Sonó / vibró durante 1 segundo?")
 
         except Exception as exc:
             all_ok = fail(f"Error GPIO: {exc}")
         finally:
             try:
-                GPIO.output(args.buzzer_pin, GPIO.LOW)
+                GPIO.output(args.buzzer_pin, idle)
                 GPIO.cleanup()
             except Exception:
                 pass
