@@ -41,6 +41,7 @@ class VisionConfig:
 class HardwareConfig:
     buzzer_pin: int = 18
     buzzer_active: bool = True   # True = active buzzer (DC); False = passive (PWM)
+    buzzer_invert: bool = False  # True = active-low module (LOW=ON, HIGH=OFF)
     oled_address: int = 0x3C
     oled_width: int = 128
     oled_height: int = 64
@@ -171,6 +172,7 @@ class ConfigProfile:
         self.hardware = HardwareConfig(
             buzzer_pin=int(hw.get("buzzer_pin", 18)),
             buzzer_active=bool(hw.get("buzzer_active", True)),
+            buzzer_invert=bool(hw.get("buzzer_invert", False)),
             oled_address=int(str(oled_addr_raw), 16),
             oled_width=int(hw.get("oled_width", 128)),
             oled_height=int(hw.get("oled_height", 64)),

@@ -15,6 +15,8 @@ hardware:
   buzzer_pin: 18
   buzzer_active: true    # true = buzzer activo (oscilador interno, solo DC)
                          # false = buzzer pasivo (necesita PWM 2 kHz)
+  buzzer_invert: false   # true = lógica invertida (LOW=ON, HIGH=OFF)
+                         # Activa si tu módulo de buzzer suena al revés
   oled_address: "0x3C"  # quoted string — parsed with int(str(v), 16)
   oled_width: 128
   oled_height: 64

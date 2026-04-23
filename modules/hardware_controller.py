@@ -181,45 +181,47 @@ class HardwareController:
         try:
             _GPIO.setmode(_GPIO.BCM)
             _GPIO.setwarnings(False)
-            _GPIO.setup(self._config.buzzer_pin, _GPIO.OUT, initial=_GPIO.LOW)
+            # idle state: HIGH for normal logic, LOW for inverted modules
+            idle = _GPIO.LOW if not self._config.buzzer_invert else _GPIO.HIGH
+            _GPIO.setup(self._config.buzzer_pin, _GPIO.OUT, initial=idle)
 
             if not self._config.buzzer_active:
-                # Passive buzzer — needs PWM to produce a tone
                 self._pwm = _GPIO.PWM(self._config.buzzer_pin, _BUZZER_FREQ_HZ)
 
             btype = "activo" if self._config.buzzer_active else f"pasivo {_BUZZER_FREQ_HZ} Hz"
-            logger.info("GPIO initialised — Buzzer BCM%d (%s).",
-                        self._config.buzzer_pin, btype)
+            inv   = " lógica-invertida" if self._config.buzzer_invert else ""
+            logger.info("GPIO initialised — Buzzer BCM%d (%s%s).",
+                        self._config.buzzer_pin, btype, inv)
         except Exception:
             logger.exception("GPIO init failed — outputs disabled.")
             self._pwm = None
 
     def _beep(self, duration_ms: int, count: int):
-        """Emit a buzzer/motor pattern in a background thread.
+        """Emit a buzzer/motor alert pattern in a background thread.
 
-        Active buzzer / vibration motor (buzzer_active=True):
-            Driven with GPIO HIGH/LOW — the device generates its own tone.
-        Passive buzzer (buzzer_active=False):
-            Driven with 2 kHz PWM — the GPIO signal creates the tone.
+        buzzer_active=True  → active buzzer / motor: DC HIGH/LOW (or inverted).
+        buzzer_active=False → passive buzzer: 2 kHz PWM.
+        buzzer_invert=True  → swap HIGH/LOW for active-low modules.
         """
+        on  = _GPIO.LOW  if self._config.buzzer_invert else _GPIO.HIGH
+        off = _GPIO.HIGH if self._config.buzzer_invert else _GPIO.LOW
+
         with self._buzzer_lock:
             dur = duration_ms / 1000.0
             for i in range(count):
                 try:
                     if self._config.buzzer_active:
-                        # Active buzzer / motor: simple DC on/off
-                        _GPIO.output(self._config.buzzer_pin, _GPIO.HIGH)
+                        _GPIO.output(self._config.buzzer_pin, on)
                         time.sleep(dur)
-                        _GPIO.output(self._config.buzzer_pin, _GPIO.LOW)
+                        _GPIO.output(self._config.buzzer_pin, off)
                     else:
-                        # Passive buzzer: PWM tone
                         if self._pwm is None:
                             return
                         self._pwm.start(50)
                         time.sleep(dur)
                         self._pwm.stop()
                     if i < count - 1:
-                        time.sleep(0.08)   # gap between beeps
+                        time.sleep(0.08)
                 except Exception:
                     logger.exception("Buzzer error.")
                     break
