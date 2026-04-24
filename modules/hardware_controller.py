@@ -2,17 +2,19 @@
 
 Alert routing
 ─────────────
-  LEVEL1  → OLED update only
-  LEVEL2  → motor vibrates
-  LEVEL3  → buzzer sounds
+  LEVEL1  → OLED only      (face + data pages cycle every 5 s)
+  LEVEL2  → motor vibrates  (BCM 17)
+  LEVEL3  → buzzer sounds   (BCM 18, passive PWM 2 kHz)
+
+  If the posture is not corrected, the alert repeats every 15 minutes.
 
 Auto-detects available hardware at import time.  If GPIO or OLED libraries
 are absent (e.g., on a development PC), the controller transparently enters
 Simulation Mode and prints alerts to stdout instead.
 
 Real hardware wiring (RPi5):
-  - Vibration motor : GPIO motor_pin  (BCM 17)  ← active at LEVEL1+
-  - Buzzer (KY-012) : GPIO buzzer_pin (BCM 18)  ← active at LEVEL3 only
+  - Vibration motor : GPIO motor_pin  (BCM 17)
+  - Buzzer (passive): GPIO buzzer_pin (BCM 18)
   - OLED            : I2C SSD1306 128×64 at 0x3C (I2C bus 1)
 
 Buzzer/motor types (buzzer_active / motor_active in config/default.yaml):
@@ -98,8 +100,8 @@ _BUZZER_PATTERNS: dict[AlertLevel, tuple[int, int]] = {
     AlertLevel.LEVEL3: (300, 3),   # 3 long beeps
 }
 
-# If posture is not corrected, repeat the alert every N seconds.
-_ALERT_REPEAT_S: float = 10.0
+# If posture is not corrected, repeat the alert every N seconds (15 min).
+_ALERT_REPEAT_S: float = 900.0
 
 # OLED is updated at most this often (seconds).  I2C transfers at 100 kHz
 # take ~100 ms for a 128×64 frame — too slow to call every inference cycle.

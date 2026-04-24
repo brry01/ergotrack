@@ -1,7 +1,7 @@
 vision:
   fps: 5              # 5 FPS is enough for posture alerts; halves MJPEG decode load
   resolution: [320, 240]
-  model_path: "models/pose_landmarker_lite.task"
+  model_path: "models/movenet_lightning.tflite"  # MoveNet via ai-edge-litert (RPi5)
 
 thresholds:
   neck_flexion_warn: 25.0       # degrees; 0 = upright, positive = forward flex
@@ -12,16 +12,15 @@ thresholds:
   shoulder_asymmetry_severe: 10.0
 
 hardware:
-  # ── Buzzer (KY-012 activo) ────────────────────────────────────────────────
-  buzzer_pin: 18         # BCM pin; activa solo en LEVEL3
-  buzzer_active: false   # true = buzzer activo (oscilador interno, solo DC)
-                         # false = buzzer pasivo (necesita PWM 2 kHz)
+  # ── Buzzer pasivo (PWM 2 kHz) — activa solo en LEVEL3 ───────────────────
+  buzzer_pin: 18
+  buzzer_active: false   # false = pasivo (PWM); true = activo (DC)
   buzzer_invert: false   # true = lógica invertida (LOW=ON, HIGH=OFF)
 
-  # ── Motor de vibración ────────────────────────────────────────────────────
-  motor_pin: 17          # BCM pin; activa desde LEVEL1
-  motor_active: true     # true = DC HIGH/LOW; false = PWM 2 kHz
-  motor_invert: false    # true = lógica invertida (LOW=ON)
+  # ── Motor de vibración (DC) — activa en LEVEL2 ───────────────────────────
+  motor_pin: 17
+  motor_active: true     # true = DC HIGH/LOW; false = PWM
+  motor_invert: false
 
   # ── OLED ─────────────────────────────────────────────────────────────────
   oled_address: "0x3C"  # quoted string — parsed with int(str(v), 16)

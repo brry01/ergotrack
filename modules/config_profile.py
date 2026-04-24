@@ -39,15 +39,15 @@ class VisionConfig:
 
 @dataclass
 class HardwareConfig:
-    # Buzzer (KY-012) — fires only at LEVEL3
+    # Buzzer (passive, PWM 2 kHz) — fires only at LEVEL3
     buzzer_pin: int = 18
-    buzzer_active: bool = True   # True = active buzzer (DC); False = passive (PWM)
+    buzzer_active: bool = False  # False = passive buzzer (PWM); True = active (DC)
     buzzer_invert: bool = False  # True = active-low module (LOW=ON, HIGH=OFF)
-    # Vibration motor — fires from LEVEL1 upward
+    # Vibration motor (DC) — fires at LEVEL2
     motor_pin: int = 17
     motor_active: bool = True    # True = DC HIGH/LOW; False = PWM
     motor_invert: bool = False   # True = active-low module
-    # OLED
+    # OLED SSD1306 (I2C) — updates at LEVEL1+, cycles face/data every 5 s
     oled_address: int = 0x3C
     oled_width: int = 128
     oled_height: int = 64

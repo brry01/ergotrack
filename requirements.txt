@@ -25,10 +25,16 @@ customtkinter>=5.2
 pytest>=7.4
 luma.oled>=3.12          # SSD1306 OLED — simpler than adafruit on RPi OS
 
-# --- mediapipe for arm64 (RPi OS) — community wheel -------------------------
-# No official aarch64 wheel exists. Install with:
+# --- Pose inference (RPi5 / ARM64) -----------------------------------------
+# Primary backend: MoveNet Lightning via ai-edge-litert (avoids MediaPipe
+# XNNPACK/SVE crash on Cortex-A76).  Install with:
+#   pip install ai-edge-litert
+# Download model:
+#   python scripts/download_models.py
+#
+# Fallback backend: mediapipe mp.solutions.pose (x86 / PC dev only).
+# No official aarch64 wheel — community wheel:
 #   pip install mediapipe --extra-index-url https://pinto0309.github.io/simple/
-# Or download from: https://github.com/PINTO0309/mediapipe-bin
 
 # --- PC development only (x86/x64, simulation mode) ------------------------
-# pip install mediapipe opencv-python Pillow numpy
+# pip install mediapipe opencv-python Pillow numpy ai-edge-litert

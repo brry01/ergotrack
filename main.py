@@ -194,7 +194,10 @@ def run_headless(vm, pl: PostureLogic, hw: HardwareController,
                 )
 
             if csv_writer:
-                write_csv_row(csv_writer, report)
+                try:
+                    write_csv_row(csv_writer, report)
+                except OSError as exc:
+                    logger.warning("CSV write failed: %s", exc)
 
             elapsed = time.perf_counter() - cycle_start
             sleep_time = frame_interval - elapsed
