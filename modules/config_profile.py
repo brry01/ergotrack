@@ -39,9 +39,15 @@ class VisionConfig:
 
 @dataclass
 class HardwareConfig:
+    # Buzzer (KY-012) — fires only at LEVEL3
     buzzer_pin: int = 18
     buzzer_active: bool = True   # True = active buzzer (DC); False = passive (PWM)
     buzzer_invert: bool = False  # True = active-low module (LOW=ON, HIGH=OFF)
+    # Vibration motor — fires from LEVEL1 upward
+    motor_pin: int = 17
+    motor_active: bool = True    # True = DC HIGH/LOW; False = PWM
+    motor_invert: bool = False   # True = active-low module
+    # OLED
     oled_address: int = 0x3C
     oled_width: int = 128
     oled_height: int = 64
@@ -173,6 +179,9 @@ class ConfigProfile:
             buzzer_pin=int(hw.get("buzzer_pin", 18)),
             buzzer_active=bool(hw.get("buzzer_active", True)),
             buzzer_invert=bool(hw.get("buzzer_invert", False)),
+            motor_pin=int(hw.get("motor_pin", 17)),
+            motor_active=bool(hw.get("motor_active", True)),
+            motor_invert=bool(hw.get("motor_invert", False)),
             oled_address=int(str(oled_addr_raw), 16),
             oled_width=int(hw.get("oled_width", 128)),
             oled_height=int(hw.get("oled_height", 64)),

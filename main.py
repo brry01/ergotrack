@@ -273,7 +273,10 @@ def main():
     pl = PostureLogic(config.thresholds, config.alert_state)
 
     # 5. Hardware controller
-    hw = HardwareController(config.hardware, sim_mode=simulate)
+    # sim_mode for hardware is independent of vision simulation:
+    # on RPi we always drive real GPIO/OLED even when using the camera simulator.
+    hw_sim_mode = not is_raspberry_pi()
+    hw = HardwareController(config.hardware, sim_mode=hw_sim_mode)
 
     # 6. Launch mode
     try:

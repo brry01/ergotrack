@@ -5,28 +5,42 @@ responde correctamente.
 
 Uso:
     python scripts/test_hardware.py                    # prueba todo
-    python scripts/test_hardware.py --gpio             # solo buzzer/motor
+    python scripts/test_hardware.py --gpio             # solo buzzer + motor
+    python scripts/test_hardware.py --motor            # solo motor de vibración
+    python scripts/test_hardware.py --buzzer           # solo buzzer
     python scripts/test_hardware.py --oled             # solo OLED
     python scripts/test_hardware.py --passive-buzzer   # buzzer pasivo (PWM)
+    python scripts/test_hardware.py --invert-buzzer    # lógica invertida buzzer
+    python scripts/test_hardware.py --invert-motor     # lógica invertida motor
 """
 from __future__ import annotations
 import argparse, os, sys, time, shutil, subprocess
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--gpio", action="store_true")
-parser.add_argument("--oled", action="store_true")
+parser.add_argument("--gpio",   action="store_true", help="Probar buzzer + motor")
+parser.add_argument("--motor",  action="store_true", help="Probar solo motor")
+parser.add_argument("--buzzer", action="store_true", help="Probar solo buzzer")
+parser.add_argument("--oled",   action="store_true", help="Probar solo OLED")
 parser.add_argument("--passive-buzzer", action="store_true",
                     help="Tratar buzzer como pasivo (PWM 2kHz) en vez de activo (DC)")
 parser.add_argument("--invert-buzzer", action="store_true",
-                    help="Lógica invertida: LOW=ON, HIGH=OFF (módulos active-low)")
+                    help="Lógica invertida buzzer: LOW=ON, HIGH=OFF")
+parser.add_argument("--invert-motor", action="store_true",
+                    help="Lógica invertida motor: LOW=ON, HIGH=OFF")
 # pines configurables (deben coincidir con config/default.yaml)
-parser.add_argument("--buzzer-pin", type=int, default=18)
+parser.add_argument("--buzzer-pin", type=int, default=18,
+                    help="Pin BCM del buzzer (default: 18)")
+parser.add_argument("--motor-pin",  type=int, default=17,
+                    help="Pin BCM del motor de vibración (default: 17)")
 parser.add_argument("--oled-addr",  default="0x3C")
 parser.add_argument("--i2c-bus",    type=int, default=1)
 args = parser.parse_args()
-run_all  = not args.gpio and not args.oled
-run_gpio = run_all or args.gpio
-run_oled = run_all or args.oled
+
+# Si no se especifica nada → probar todo
+run_explicit = args.gpio or args.motor or args.buzzer or args.oled
+run_motor  = not run_explicit or args.gpio or args.motor
+run_buzzer = not run_explicit or args.gpio or args.buzzer
+run_oled   = not run_explicit or args.oled
 
 PASS = "\033[32m✓\033[0m"
 FAIL = "\033[91m✗\033[0m"
@@ -46,7 +60,7 @@ hdr("1 ─ Librerías Python")
 
 # GPIO
 GPIO = None
-if run_gpio:
+if run_motor or run_buzzer:
     try:
         import RPi.GPIO as GPIO
         ok(f"RPi.GPIO importado  ({GPIO.VERSION})")
@@ -79,38 +93,100 @@ if run_oled:
         )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2.  GPIO  (Buzzer / Motor de vibración)
+# helpers GPIO
 # ══════════════════════════════════════════════════════════════════════════════
-if run_gpio:
-    hdr("2 ─ GPIO — Buzzer / Motor (BCM {})".format(args.buzzer_pin))
+
+def _check_gpio_access():
+    gpio_dev = None
+    for dev in ["/dev/gpiochip4", "/dev/gpiochip0", "/dev/gpiomem"]:
+        if os.path.exists(dev):
+            gpio_dev = dev
+            break
+    if gpio_dev and os.access(gpio_dev, os.R_OK | os.W_OK):
+        ok(f"{gpio_dev} accesible")
+    else:
+        warn(
+            f"Sin acceso a {gpio_dev or 'dispositivo GPIO'}.\n"
+            "     Fix permanente: sudo usermod -aG gpio $USER  (luego cerrar sesión)\n"
+            "     O corre el script con 'newgrp gpio' primero."
+        )
+
+def _pulse_pin(GPIO, pin, on, off, passive_pwm=False, duration=0.2, count=2):
+    """Emit `count` pulses on `pin`. Returns True on success."""
+    try:
+        if passive_pwm:
+            pwm = GPIO.PWM(pin, 2000)
+            for i in range(count):
+                pwm.start(50); time.sleep(duration)
+                pwm.stop();    time.sleep(0.1)
+            pwm.stop()
+        else:
+            for i in range(count):
+                GPIO.output(pin, on);  time.sleep(duration)
+                GPIO.output(pin, off); time.sleep(0.1)
+        return True
+    except Exception as exc:
+        fail(f"Error GPIO pin {pin}: {exc}")
+        return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2.  MOTOR DE VIBRACIÓN  (BCM 17 por defecto)
+# ══════════════════════════════════════════════════════════════════════════════
+if run_motor:
+    hdr(f"2 ─ Motor de vibración (BCM {args.motor_pin})")
 
     if GPIO is None:
         warn("Omitido — RPi.GPIO no disponible")
     else:
-        # RPi5 usa /dev/gpiochip4 (lgpio), no /dev/gpiomem.
-        # Detectamos el dispositivo correcto según el hardware.
-        gpio_dev = None
-        for dev in ["/dev/gpiochip4", "/dev/gpiochip0", "/dev/gpiomem"]:
-            if os.path.exists(dev):
-                gpio_dev = dev
-                break
+        _check_gpio_access()
 
-        if gpio_dev and os.access(gpio_dev, os.R_OK | os.W_OK):
-            ok(f"{gpio_dev} accesible")
-        else:
-            warn(
-                f"Sin acceso a {gpio_dev or 'dispositivo GPIO'}.\n"
-                "     Si el test falla, corre con: sudo python scripts/test_hardware.py --gpio\n"
-                "     Fix permanente: sudo usermod -aG gpio $USER  (luego cerrar sesión)"
-            )
+        motor_inv = args.invert_motor
+        ON  = GPIO.LOW  if motor_inv else GPIO.HIGH
+        OFF = GPIO.HIGH if motor_inv else GPIO.LOW
+        idle = GPIO.HIGH if motor_inv else GPIO.LOW
 
-        # Lógica ON/OFF según modo
-        if args.invert_buzzer:
-            ON, OFF = GPIO.LOW, GPIO.HIGH
-            idle = GPIO.HIGH
-        else:
-            ON, OFF = GPIO.HIGH, GPIO.LOW
-            idle = GPIO.LOW
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            GPIO.setup(args.motor_pin, GPIO.OUT, initial=idle)
+
+            print(f"     Simulando LEVEL1 — 1 vibración (150 ms)…")
+            _pulse_pin(GPIO, args.motor_pin, ON, OFF, duration=0.15, count=1)
+            time.sleep(0.3)
+
+            print(f"     Simulando LEVEL2 — 2 vibraciones…")
+            _pulse_pin(GPIO, args.motor_pin, ON, OFF, duration=0.15, count=2)
+            time.sleep(0.3)
+
+            print(f"     Simulando LEVEL3 — 3 vibraciones…")
+            _pulse_pin(GPIO, args.motor_pin, ON, OFF, duration=0.30, count=3)
+
+            ok("Motor probado — ¿vibró?")
+
+        except Exception as exc:
+            all_ok = fail(f"Error motor: {exc}")
+        finally:
+            try:
+                GPIO.output(args.motor_pin, idle)
+                GPIO.cleanup()
+            except Exception:
+                pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3.  BUZZER  (BCM 18 por defecto)
+# ══════════════════════════════════════════════════════════════════════════════
+if run_buzzer:
+    hdr(f"3 ─ Buzzer KY-012 (BCM {args.buzzer_pin})")
+
+    if GPIO is None:
+        warn("Omitido — RPi.GPIO no disponible")
+    else:
+        _check_gpio_access()
+
+        buzzer_inv = args.invert_buzzer
+        ON  = GPIO.LOW  if buzzer_inv else GPIO.HIGH
+        OFF = GPIO.HIGH if buzzer_inv else GPIO.LOW
+        idle = GPIO.HIGH if buzzer_inv else GPIO.LOW
 
         try:
             GPIO.setmode(GPIO.BCM)
@@ -118,35 +194,25 @@ if run_gpio:
             GPIO.setup(args.buzzer_pin, GPIO.OUT, initial=idle)
 
             if args.passive_buzzer:
-                # ── Buzzer pasivo: PWM 2 kHz ──────────────────────────────
                 hdr("  Modo: buzzer PASIVO (PWM 2 kHz)")
-                pwm = GPIO.PWM(args.buzzer_pin, 2000)
-                print("     Patrón LEVEL2 (2 bips PWM)…")
-                for _ in range(2):
-                    pwm.start(50); time.sleep(0.15)
-                    pwm.stop();    time.sleep(0.1)
-                pwm.stop()
+                print("     3 bips PWM…")
+                _pulse_pin(GPIO, args.buzzer_pin, ON, OFF, passive_pwm=True,
+                           duration=0.30, count=3)
                 ok("Patrón PWM enviado — ¿escuchaste el tono?")
             else:
-                # ── Buzzer activo / Motor: DC HIGH/LOW ────────────────────
-                inv_note = " [lógica invertida: LOW=ON]" if args.invert_buzzer else ""
-                hdr(f"  Modo: buzzer ACTIVO / motor (DC){inv_note}")
-
-                print("     Patrón LEVEL2 (2 pulsos)…")
-                for _ in range(2):
-                    GPIO.output(args.buzzer_pin, ON);  time.sleep(0.2)
-                    GPIO.output(args.buzzer_pin, OFF); time.sleep(0.1)
+                hdr("  Modo: buzzer ACTIVO (DC HIGH/LOW)")
+                print("     3 pulsos DC  (simulando LEVEL3)…")
+                _pulse_pin(GPIO, args.buzzer_pin, ON, OFF, duration=0.30, count=3)
                 time.sleep(0.3)
-                ok("Patrón enviado — ¿sonó / vibró?")
 
                 print("     DC continuo 1 s…")
                 GPIO.output(args.buzzer_pin, ON)
                 time.sleep(1.0)
                 GPIO.output(args.buzzer_pin, OFF)
-                ok("¿Sonó / vibró durante 1 segundo?")
+                ok("¿Sonó el buzzer durante 1 segundo?")
 
         except Exception as exc:
-            all_ok = fail(f"Error GPIO: {exc}")
+            all_ok = fail(f"Error buzzer: {exc}")
         finally:
             try:
                 GPIO.output(args.buzzer_pin, idle)
@@ -155,12 +221,11 @@ if run_gpio:
                 pass
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3.  I2C / OLED
+# 4.  I2C / OLED
 # ══════════════════════════════════════════════════════════════════════════════
 if run_oled:
-    hdr("3 ─ I2C / OLED")
+    hdr("4 ─ I2C / OLED")
 
-    # i2cdetect
     addr_int = int(args.oled_addr, 16)
     if shutil.which("i2cdetect"):
         res = subprocess.run(

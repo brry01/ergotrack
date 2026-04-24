@@ -12,11 +12,18 @@ thresholds:
   shoulder_asymmetry_severe: 10.0
 
 hardware:
-  buzzer_pin: 18
-  buzzer_active: true    # true = buzzer activo (oscilador interno, solo DC)
+  # ── Buzzer (KY-012 activo) ────────────────────────────────────────────────
+  buzzer_pin: 18         # BCM pin; activa solo en LEVEL3
+  buzzer_active: false   # true = buzzer activo (oscilador interno, solo DC)
                          # false = buzzer pasivo (necesita PWM 2 kHz)
   buzzer_invert: false   # true = lógica invertida (LOW=ON, HIGH=OFF)
-                         # Activa si tu módulo de buzzer suena al revés
+
+  # ── Motor de vibración ────────────────────────────────────────────────────
+  motor_pin: 17          # BCM pin; activa desde LEVEL1
+  motor_active: true     # true = DC HIGH/LOW; false = PWM 2 kHz
+  motor_invert: false    # true = lógica invertida (LOW=ON)
+
+  # ── OLED ─────────────────────────────────────────────────────────────────
   oled_address: "0x3C"  # quoted string — parsed with int(str(v), 16)
   oled_width: 128
   oled_height: 64
