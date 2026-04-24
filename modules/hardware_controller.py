@@ -128,8 +128,10 @@ class HardwareController:
         Defaults to True automatically when neither GPIO nor OLED is found.
     """
 
-    def __init__(self, config: HardwareConfig, sim_mode: bool = False):
+    def __init__(self, config: HardwareConfig, sim_mode: bool = False,
+                 alert_repeat_s: float = _ALERT_REPEAT_S):
         self._config = config
+        self._alert_repeat_s = alert_repeat_s
         self._sim_mode: bool = sim_mode or not (_HAS_GPIO or _HAS_OLED)
         self._pwm_buzzer = None   # passive buzzer PWM (buzzer_active=False)
         self._pwm_motor  = None   # passive motor  PWM (motor_active=False)
@@ -171,7 +173,7 @@ class HardwareController:
         level_changed = (level != self._last_level)
         repeat_due    = (level != AlertLevel.OK
                          and not level_changed
-                         and (now - self._last_alert_t) >= _ALERT_REPEAT_S)
+                         and (now - self._last_alert_t) >= self._alert_repeat_s)
 
         if not level_changed and not repeat_due:
             return   # nothing to do this cycle

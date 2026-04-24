@@ -78,6 +78,8 @@ def parse_args() -> argparse.Namespace:
                         help="Simulator scenario (default: cycling)")
     parser.add_argument("--monitor", action="store_true",
                         help="Print live coloured metrics to the terminal (headless mode only)")
+    parser.add_argument("--test", action="store_true",
+                        help="Test mode: repeat alert every 10 s instead of 15 min")
     return parser.parse_args()
 
 
@@ -278,8 +280,12 @@ def main():
     # 5. Hardware controller
     # sim_mode for hardware is independent of vision simulation:
     # on RPi we always drive real GPIO/OLED even when using the camera simulator.
-    hw_sim_mode = not is_raspberry_pi()
-    hw = HardwareController(config.hardware, sim_mode=hw_sim_mode)
+    hw_sim_mode    = not is_raspberry_pi()
+    alert_repeat_s = 10.0 if args.test else 900.0   # 10 s test / 15 min normal
+    hw = HardwareController(config.hardware, sim_mode=hw_sim_mode,
+                            alert_repeat_s=alert_repeat_s)
+    if args.test:
+        logger.warning("TEST MODE — repeat alert every 10 s (normal: 15 min)")
 
     # 6. Launch mode
     try:
