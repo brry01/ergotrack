@@ -162,11 +162,11 @@ class PostureLogic:
         if neck >= t.neck_flexion_severe:
             return AlertLevel.LEVEL3, "neck_flexion"
         if neck >= t.neck_flexion_warn:
-            return AlertLevel.LEVEL1, "neck_flexion"
+            return AlertLevel.LEVEL2, "neck_flexion"   # moderate → motor
 
         # FHP
         if fhp >= t.fhp_severe:
-            return AlertLevel.LEVEL2, "fhp"
+            return AlertLevel.LEVEL3, "fhp"
         if fhp >= t.fhp_warn:
             return AlertLevel.LEVEL1, "fhp"
 

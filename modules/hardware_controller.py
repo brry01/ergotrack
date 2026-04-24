@@ -130,6 +130,8 @@ class HardwareController:
         self._motor_lock   = threading.Lock()
         self._buzzer_lock  = threading.Lock()
         self._motor_cancel = threading.Event()   # set → stop motor pattern
+        self._buzzer_cancel = threading.Event()  # set → stop buzzer pattern
+        self._last_level   = AlertLevel.OK       # track transitions — only fire on change
         self._last_oled_t: float = 0.0
 
         if self._sim_mode:
@@ -143,26 +145,39 @@ class HardwareController:
     # ------------------------------------------------------------------
 
     def trigger_alert(self, level: AlertLevel):
-        """Fire the appropriate alert output for the given AlertLevel.
+        """Fire the appropriate alert output when the level changes.
+
+        Only reacts on transitions (OK→L1, L1→L2, etc.) — ignores repeated
+        calls at the same level to prevent stacking background threads.
 
         Routing:
           LEVEL1 → OLED only  (update_oled handles the display)
           LEVEL2 → motor vibration
           LEVEL3 → buzzer beep
-          OK     → cancel any running motor pattern
+          OK     → cancel any running motor/buzzer pattern
         """
         if self._sim_mode:
-            if level != AlertLevel.OK:
-                print(f"[ALERT] Level {level.name}", flush=True)
+            if level != self._last_level:
+                if level != AlertLevel.OK:
+                    print(f"[ALERT] Level {level.name}", flush=True)
+                else:
+                    print("[OK] Postura corregida", flush=True)
+            self._last_level = level
             return
+
+        # ── Only act on level transitions ──────────────────────────────────
+        if level == self._last_level:
+            return
+        self._last_level = level
 
         if level == AlertLevel.OK:
-            # Cancel any queued or running motor pulses immediately
             self._motor_cancel.set()
+            self._buzzer_cancel.set()
             return
 
-        # Clear cancel flag before starting new pattern
+        # New non-OK level — cancel previous and start fresh
         self._motor_cancel.clear()
+        self._buzzer_cancel.clear()
 
         motor_pattern = _MOTOR_PATTERNS.get(level)
         if motor_pattern:
@@ -315,6 +330,8 @@ class HardwareController:
         with self._buzzer_lock:
             dur = duration_ms / 1000.0
             for i in range(count):
+                if self._buzzer_cancel.is_set():
+                    break
                 try:
                     if cfg.buzzer_active:
                         _GPIO.output(cfg.buzzer_pin, on)
@@ -323,14 +340,30 @@ class HardwareController:
                     else:
                         if self._pwm_buzzer is None:
                             return
-                        self._pwm_buzzer.start(50)
-                        time.sleep(dur)
-                        self._pwm_buzzer.stop()
-                    if i < count - 1:
+                        try:
+                            self._pwm_buzzer.start(50)
+                            time.sleep(dur)
+                        finally:
+                            self._pwm_buzzer.stop()
+                            # Explicitly drive LOW so passive buzzer goes silent
+                            try:
+                                _GPIO.output(cfg.buzzer_pin, off)
+                            except Exception:
+                                pass
+                    if i < count - 1 and not self._buzzer_cancel.is_set():
                         time.sleep(0.08)
                 except Exception:
                     logger.exception("Buzzer error.")
                     break
+            # Ensure buzzer is off when pattern ends or is cancelled
+            try:
+                if cfg.buzzer_active:
+                    _GPIO.output(cfg.buzzer_pin, off)
+                elif self._pwm_buzzer is not None:
+                    self._pwm_buzzer.stop()
+                    _GPIO.output(cfg.buzzer_pin, off)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Internal — OLED  (luma.oled + PIL)
