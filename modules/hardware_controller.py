@@ -103,7 +103,9 @@ _ALERT_REPEAT_S: float = 10.0
 
 # OLED is updated at most this often (seconds).  I2C transfers at 100 kHz
 # take ~100 ms for a 128×64 frame — too slow to call every inference cycle.
-_OLED_MIN_INTERVAL_S = 2.0
+_OLED_MIN_INTERVAL_S  = 1.0
+# Cycle between face page and data page every N seconds.
+_OLED_PAGE_INTERVAL_S = 5.0
 
 
 class HardwareController:
@@ -137,6 +139,8 @@ class HardwareController:
         self._last_level    = AlertLevel.OK      # track transitions
         self._last_alert_t  = 0.0               # monotonic time of last alert fire
         self._last_oled_t   = 0.0
+        self._oled_page     = 0                  # 0 = face, 1 = data
+        self._last_page_t   = 0.0               # monotonic time of last page switch
 
         if self._sim_mode:
             logger.info("HardwareController: simulation mode active.")
@@ -216,18 +220,30 @@ class HardwareController:
     def update_oled(self, report: PostureReport):
         """Render a PostureReport summary to the OLED display.
 
-        Internally throttled to at most once every ``_OLED_MIN_INTERVAL_S``
-        seconds — I2C transfers take ~100 ms and must not block the main loop
-        on every inference cycle.  Safe to call on every frame.
+        Cycles between a face page (5 s) and a data page (5 s).
+        Throttled to at most once every _OLED_MIN_INTERVAL_S seconds.
+        Safe to call on every frame.
         """
         if self._sim_mode or self._oled is None or not _HAS_PIL:
             return
         now = time.monotonic()
-        if now - self._last_oled_t < _OLED_MIN_INTERVAL_S:
+
+        # Page switch — overrides throttle so transition is immediate
+        page_switched = False
+        if now - self._last_page_t >= _OLED_PAGE_INTERVAL_S:
+            self._oled_page   = 1 - self._oled_page
+            self._last_page_t = now
+            page_switched     = True
+
+        if not page_switched and (now - self._last_oled_t < _OLED_MIN_INTERVAL_S):
             return
+
         self._last_oled_t = now
         try:
-            self._render_oled(report)
+            if self._oled_page == 0:
+                self._render_face(report)
+            else:
+                self._render_data(report)
         except Exception:
             logger.exception("OLED render error.")
 
@@ -425,26 +441,103 @@ class HardwareController:
                 )
             self._oled = None
 
-    def _render_oled(self, report: PostureReport):
-        """Draw PostureReport data onto the OLED using luma.oled canvas API."""
+    # ------------------------------------------------------------------
+    # OLED pages
+    # ------------------------------------------------------------------
+
+    def _render_face(self, report: PostureReport):
+        """Page 0 — animated face whose expression reflects severity.
+
+        Display is 128×64.  Face is centred at (64, 33), radius 22 px.
+        A small status label sits at the very bottom.
+
+        Faces:
+          OK      → big smile, dot eyes
+          LEVEL1  → neutral line mouth, dot eyes
+          LEVEL2  → worried frown, angled eyebrows
+          LEVEL3  → big frown, raised brows, alarmed open eyes
+        """
         if not (_HAS_PIL and self._oled is not None):
             return
 
-        from luma.core.render import canvas   # type: ignore  # local import — only on RPi
+        from luma.core.render import canvas  # type: ignore
 
+        lvl  = report.severity
+        font = _PIL_Font.load_default()
+
+        # face geometry
+        cx, cy, r = 64, 31, 22
+        x0, y0, x1, y1 = cx - r, cy - r, cx + r, cy + r   # head bounding box
+
+        # eye centres
+        ex_l, ex_r, ey = cx - 8, cx + 8, cy - 5
+
+        with canvas(self._oled) as draw:
+            # ── head ────────────────────────────────────────────────────
+            draw.ellipse((x0, y0, x1, y1), outline="white")
+
+            if lvl == AlertLevel.OK:
+                # dot eyes
+                draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
+                draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
+                # big smile
+                draw.arc((cx-14, cy+2, cx+14, cy+18),
+                         start=200, end=340, fill="white")
+
+            elif lvl == AlertLevel.LEVEL1:
+                # dot eyes
+                draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
+                draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
+                # flat mouth (neutral)
+                draw.line((cx-10, cy+10, cx+10, cy+10), fill="white", width=2)
+
+            elif lvl == AlertLevel.LEVEL2:
+                # angled worried eyebrows
+                draw.line((ex_l-5, ey-8, ex_l+3, ey-12), fill="white", width=2)
+                draw.line((ex_r-3, ey-12, ex_r+5, ey-8), fill="white", width=2)
+                # dot eyes
+                draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
+                draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
+                # frown
+                draw.arc((cx-14, cy+4, cx+14, cy+18),
+                         start=20, end=160, fill="white")
+
+            else:  # LEVEL3
+                # steep alarmed eyebrows
+                draw.line((ex_l-6, ey-6, ex_l+4, ey-13), fill="white", width=2)
+                draw.line((ex_r-4, ey-13, ex_r+6, ey-6), fill="white", width=2)
+                # wide open eyes (ring)
+                draw.ellipse((ex_l-5, ey-5, ex_l+5, ey+5), outline="white")
+                draw.ellipse((ex_l-2, ey-2, ex_l+2, ey+2), fill="white")
+                draw.ellipse((ex_r-5, ey-5, ex_r+5, ey+5), outline="white")
+                draw.ellipse((ex_r-2, ey-2, ex_r+2, ey+2), fill="white")
+                # big frown
+                draw.arc((cx-16, cy+3, cx+16, cy+20),
+                         start=20, end=160, fill="white")
+
+            # ── status label (bottom) ────────────────────────────────────
+            label = report.severity.name
+            if report.dominant_issue != "none":
+                label += f" {report.dominant_issue[:4].upper()}"
+            draw.text((0, 56), label, font=font, fill="white")
+
+    def _render_data(self, report: PostureReport):
+        """Page 1 — posture metrics as text."""
+        if not (_HAS_PIL and self._oled is not None):
+            return
+
+        from luma.core.render import canvas  # type: ignore
+
+        font   = _PIL_Font.load_default()
         status = report.severity.name
-        lines = [
+        lines  = [
             f"ErgoTrack [{status}]",
             f"Neck: {report.neck_flexion_deg:.1f}deg",
-            f"FHP:  {report.fhp_ratio:.2f}",
+            f"FHP:  {report.fhp_ratio:.3f}",
             f"Asym: {report.shoulder_asymmetry_deg:.1f}deg",
+            f"Issue: {report.dominant_issue}",
         ]
-
-        try:
-            font = _PIL_Font.load_default()
-        except Exception:
-            font = None
 
         with canvas(self._oled) as draw:
             for i, line in enumerate(lines):
-                draw.text((0, i * 14), line, font=font, fill="white")
+                draw.text((0, i * 12), line, font=font, fill="white")
