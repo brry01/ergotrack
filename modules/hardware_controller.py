@@ -473,35 +473,26 @@ class HardwareController:
         ex_l, ex_r, ey = cx - 8, cx + 8, cy - 5
 
         with canvas(self._oled) as draw:
-            # ── head ────────────────────────────────────────────────────
-            draw.ellipse((x0, y0, x1, y1), outline="white")
-
             # PIL arc angles: 0°=right, 90°=bottom, 180°=left, 270°=top
-            # (Y-axis points down, so clockwise in screen space)
-            # Smile  = arc through BOTTOM of bbox → start=0,   end=180
-            # Frown  = arc through TOP    of bbox → start=180, end=360
+            # Smile = arc through BOTTOM (start=0,   end=180) → U shape
+            # Frown = arc through TOP    (start=180, end=360) → ∩ shape
+
+            # eyes (dots, same for all)
+            draw.ellipse((ex_l-5, ey-5, ex_l+5, ey+5), fill="white")
+            draw.ellipse((ex_r-5, ey-5, ex_r+5, ey+5), fill="white")
 
             if lvl == AlertLevel.OK:
-                # dot eyes
-                draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
-                draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
-                # smile (arc through bottom = U shape)
-                draw.arc((cx-14, cy+2, cx+14, cy+16),
+                # smile
+                draw.arc((cx-18, cy+4, cx+18, cy+22),
                          start=0, end=180, fill="white")
 
             elif lvl in (AlertLevel.LEVEL1, AlertLevel.LEVEL2):
-                # dot eyes
-                draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
-                draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
                 # flat mouth (serious)
-                draw.line((cx-11, cy+10, cx+11, cy+10), fill="white", width=2)
+                draw.line((cx-14, cy+14, cx+14, cy+14), fill="white", width=2)
 
             else:  # LEVEL3
-                # dot eyes (slightly larger for sadness)
-                draw.ellipse((ex_l-4, ey-4, ex_l+4, ey+4), fill="white")
-                draw.ellipse((ex_r-4, ey-4, ex_r+4, ey+4), fill="white")
-                # frown (arc through top of bbox = ∩ flipped = sad curve)
-                draw.arc((cx-14, cy+2, cx+14, cy+16),
+                # frown
+                draw.arc((cx-18, cy+4, cx+18, cy+22),
                          start=180, end=360, fill="white")
 
             # ── status label (bottom) ────────────────────────────────────
