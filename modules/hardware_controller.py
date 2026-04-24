@@ -476,44 +476,33 @@ class HardwareController:
             # ── head ────────────────────────────────────────────────────
             draw.ellipse((x0, y0, x1, y1), outline="white")
 
+            # PIL arc angles: 0°=right, 90°=bottom, 180°=left, 270°=top
+            # (Y-axis points down, so clockwise in screen space)
+            # Smile  = arc through BOTTOM of bbox → start=0,   end=180
+            # Frown  = arc through TOP    of bbox → start=180, end=360
+
             if lvl == AlertLevel.OK:
                 # dot eyes
                 draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
                 draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
-                # big smile
-                draw.arc((cx-14, cy+2, cx+14, cy+18),
-                         start=200, end=340, fill="white")
+                # smile (arc through bottom = U shape)
+                draw.arc((cx-14, cy+2, cx+14, cy+16),
+                         start=0, end=180, fill="white")
 
-            elif lvl == AlertLevel.LEVEL1:
+            elif lvl in (AlertLevel.LEVEL1, AlertLevel.LEVEL2):
                 # dot eyes
                 draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
                 draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
-                # flat mouth (neutral)
-                draw.line((cx-10, cy+10, cx+10, cy+10), fill="white", width=2)
-
-            elif lvl == AlertLevel.LEVEL2:
-                # angled worried eyebrows
-                draw.line((ex_l-5, ey-8, ex_l+3, ey-12), fill="white", width=2)
-                draw.line((ex_r-3, ey-12, ex_r+5, ey-8), fill="white", width=2)
-                # dot eyes
-                draw.ellipse((ex_l-3, ey-3, ex_l+3, ey+3), fill="white")
-                draw.ellipse((ex_r-3, ey-3, ex_r+3, ey+3), fill="white")
-                # frown
-                draw.arc((cx-14, cy+4, cx+14, cy+18),
-                         start=20, end=160, fill="white")
+                # flat mouth (serious)
+                draw.line((cx-11, cy+10, cx+11, cy+10), fill="white", width=2)
 
             else:  # LEVEL3
-                # steep alarmed eyebrows
-                draw.line((ex_l-6, ey-6, ex_l+4, ey-13), fill="white", width=2)
-                draw.line((ex_r-4, ey-13, ex_r+6, ey-6), fill="white", width=2)
-                # wide open eyes (ring)
-                draw.ellipse((ex_l-5, ey-5, ex_l+5, ey+5), outline="white")
-                draw.ellipse((ex_l-2, ey-2, ex_l+2, ey+2), fill="white")
-                draw.ellipse((ex_r-5, ey-5, ex_r+5, ey+5), outline="white")
-                draw.ellipse((ex_r-2, ey-2, ex_r+2, ey+2), fill="white")
-                # big frown
-                draw.arc((cx-16, cy+3, cx+16, cy+20),
-                         start=20, end=160, fill="white")
+                # dot eyes (slightly larger for sadness)
+                draw.ellipse((ex_l-4, ey-4, ex_l+4, ey+4), fill="white")
+                draw.ellipse((ex_r-4, ey-4, ex_r+4, ey+4), fill="white")
+                # frown (arc through top of bbox = ∩ flipped = sad curve)
+                draw.arc((cx-14, cy+2, cx+14, cy+16),
+                         start=180, end=360, fill="white")
 
             # ── status label (bottom) ────────────────────────────────────
             label = report.severity.name
