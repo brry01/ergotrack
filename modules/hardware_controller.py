@@ -2,9 +2,9 @@
 
 Alert routing
 ─────────────
-  LEVEL1  → motor vibrates  (short pulse)
-  LEVEL2  → motor vibrates  (double pulse)
-  LEVEL3  → motor vibrates  (triple pulse) + buzzer sounds
+  LEVEL1  → OLED update only
+  LEVEL2  → motor vibrates
+  LEVEL3  → buzzer sounds
 
 Auto-detects available hardware at import time.  If GPIO or OLED libraries
 are absent (e.g., on a development PC), the controller transparently enters
@@ -82,18 +82,19 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Alert patterns  (duration_ms, pulse_count)
-# Motor fires on every alert level; buzzer fires only at LEVEL3.
+#
+# Routing:
+#   LEVEL1 → OLED only   (no motor, no buzzer)
+#   LEVEL2 → motor only  (vibration)
+#   LEVEL3 → buzzer only (PWM tone)
 # ---------------------------------------------------------------------------
 _BUZZER_FREQ_HZ = 2000
 
 _MOTOR_PATTERNS: dict[AlertLevel, tuple[int, int]] = {
-    AlertLevel.LEVEL1: (150, 1),   # 1 short vibration
-    AlertLevel.LEVEL2: (150, 2),   # 2 short vibrations
-    AlertLevel.LEVEL3: (300, 3),   # 3 long vibrations
+    AlertLevel.LEVEL2: (200, 2),   # 2 pulses
 }
 
 _BUZZER_PATTERNS: dict[AlertLevel, tuple[int, int]] = {
-    # Only LEVEL3 triggers the buzzer
     AlertLevel.LEVEL3: (300, 3),   # 3 long beeps
 }
 
@@ -126,8 +127,9 @@ class HardwareController:
         self._pwm_buzzer = None   # passive buzzer PWM (buzzer_active=False)
         self._pwm_motor  = None   # passive motor  PWM (motor_active=False)
         self._oled = None
-        self._motor_lock  = threading.Lock()
-        self._buzzer_lock = threading.Lock()
+        self._motor_lock   = threading.Lock()
+        self._buzzer_lock  = threading.Lock()
+        self._motor_cancel = threading.Event()   # set → stop motor pattern
         self._last_oled_t: float = 0.0
 
         if self._sim_mode:
@@ -141,11 +143,13 @@ class HardwareController:
     # ------------------------------------------------------------------
 
     def trigger_alert(self, level: AlertLevel):
-        """Fire the appropriate alert outputs for the given AlertLevel.
+        """Fire the appropriate alert output for the given AlertLevel.
 
         Routing:
-          LEVEL1/2 → motor only
-          LEVEL3   → motor + buzzer
+          LEVEL1 → OLED only  (update_oled handles the display)
+          LEVEL2 → motor vibration
+          LEVEL3 → buzzer beep
+          OK     → cancel any running motor pattern
         """
         if self._sim_mode:
             if level != AlertLevel.OK:
@@ -153,9 +157,13 @@ class HardwareController:
             return
 
         if level == AlertLevel.OK:
+            # Cancel any queued or running motor pulses immediately
+            self._motor_cancel.set()
             return
 
-        # Motor — fires for every non-OK level
+        # Clear cancel flag before starting new pattern
+        self._motor_cancel.clear()
+
         motor_pattern = _MOTOR_PATTERNS.get(level)
         if motor_pattern:
             duration_ms, count = motor_pattern
@@ -165,7 +173,6 @@ class HardwareController:
                 daemon=True,
             ).start()
 
-        # Buzzer — fires ONLY at LEVEL3
         buzzer_pattern = _BUZZER_PATTERNS.get(level)
         if buzzer_pattern:
             duration_ms, count = buzzer_pattern
@@ -259,7 +266,11 @@ class HardwareController:
     # ------------------------------------------------------------------
 
     def _activate_motor(self, duration_ms: int, count: int):
-        """Emit a vibration motor pattern in a background thread."""
+        """Emit a vibration motor pattern in a background thread.
+
+        Checks _motor_cancel before each pulse and aborts early if set,
+        so queued patterns stop immediately when OK is received.
+        """
         cfg = self._config
         on  = _GPIO.LOW  if cfg.motor_invert else _GPIO.HIGH
         off = _GPIO.HIGH if cfg.motor_invert else _GPIO.LOW
@@ -267,6 +278,8 @@ class HardwareController:
         with self._motor_lock:
             dur = duration_ms / 1000.0
             for i in range(count):
+                if self._motor_cancel.is_set():
+                    break
                 try:
                     if cfg.motor_active:
                         _GPIO.output(cfg.motor_pin, on)
@@ -278,11 +291,16 @@ class HardwareController:
                         self._pwm_motor.start(50)
                         time.sleep(dur)
                         self._pwm_motor.stop()
-                    if i < count - 1:
+                    if i < count - 1 and not self._motor_cancel.is_set():
                         time.sleep(0.08)
                 except Exception:
                     logger.exception("Motor error.")
                     break
+            # Ensure motor is off when pattern ends or is cancelled
+            try:
+                _GPIO.output(cfg.motor_pin, off)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Internal — buzzer output
