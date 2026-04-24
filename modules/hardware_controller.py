@@ -98,6 +98,9 @@ _BUZZER_PATTERNS: dict[AlertLevel, tuple[int, int]] = {
     AlertLevel.LEVEL3: (300, 3),   # 3 long beeps
 }
 
+# If posture is not corrected, repeat the alert every N seconds.
+_ALERT_REPEAT_S: float = 10.0
+
 # OLED is updated at most this often (seconds).  I2C transfers at 100 kHz
 # take ~100 ms for a 128×64 frame — too slow to call every inference cycle.
 _OLED_MIN_INTERVAL_S = 2.0
@@ -129,10 +132,11 @@ class HardwareController:
         self._oled = None
         self._motor_lock   = threading.Lock()
         self._buzzer_lock  = threading.Lock()
-        self._motor_cancel = threading.Event()   # set → stop motor pattern
+        self._motor_cancel  = threading.Event()   # set → stop motor pattern
         self._buzzer_cancel = threading.Event()  # set → stop buzzer pattern
-        self._last_level   = AlertLevel.OK       # track transitions — only fire on change
-        self._last_oled_t: float = 0.0
+        self._last_level    = AlertLevel.OK      # track transitions
+        self._last_alert_t  = 0.0               # monotonic time of last alert fire
+        self._last_oled_t   = 0.0
 
         if self._sim_mode:
             logger.info("HardwareController: simulation mode active.")
@@ -145,10 +149,11 @@ class HardwareController:
     # ------------------------------------------------------------------
 
     def trigger_alert(self, level: AlertLevel):
-        """Fire the appropriate alert output when the level changes.
+        """Fire the appropriate alert output, with repeat every _ALERT_REPEAT_S.
 
-        Only reacts on transitions (OK→L1, L1→L2, etc.) — ignores repeated
-        calls at the same level to prevent stacking background threads.
+        Fires immediately on every level transition.  If the level stays the
+        same and is non-OK, re-fires after _ALERT_REPEAT_S seconds so the user
+        keeps getting reminded until the posture is corrected.
 
         Routing:
           LEVEL1 → OLED only  (update_oled handles the display)
@@ -156,26 +161,37 @@ class HardwareController:
           LEVEL3 → buzzer beep
           OK     → cancel any running motor/buzzer pattern
         """
+        now = time.monotonic()
+        level_changed = (level != self._last_level)
+        repeat_due    = (level != AlertLevel.OK
+                         and not level_changed
+                         and (now - self._last_alert_t) >= _ALERT_REPEAT_S)
+
+        if not level_changed and not repeat_due:
+            return   # nothing to do this cycle
+
+        # ── Simulation mode ────────────────────────────────────────────────
         if self._sim_mode:
-            if level != self._last_level:
-                if level != AlertLevel.OK:
-                    print(f"[ALERT] Level {level.name}", flush=True)
-                else:
+            if level == AlertLevel.OK:
+                if level_changed:
                     print("[OK] Postura corregida", flush=True)
-            self._last_level = level
+            else:
+                tag = "(recordatorio)" if repeat_due else ""
+                print(f"[ALERT] {level.name} {tag}", flush=True)
+            self._last_level   = level
+            self._last_alert_t = now
             return
 
-        # ── Only act on level transitions ──────────────────────────────────
-        if level == self._last_level:
-            return
-        self._last_level = level
+        # ── Real hardware ──────────────────────────────────────────────────
+        self._last_level   = level
+        self._last_alert_t = now
 
         if level == AlertLevel.OK:
             self._motor_cancel.set()
             self._buzzer_cancel.set()
             return
 
-        # New non-OK level — cancel previous and start fresh
+        # Cancel previous pattern and start fresh
         self._motor_cancel.clear()
         self._buzzer_cancel.clear()
 
