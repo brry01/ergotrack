@@ -20,7 +20,7 @@ hardware:
   # ── Motor de vibración (DC) — activa en LEVEL2 ───────────────────────────
   motor_pin: 17
   motor_active: true     # true = DC HIGH/LOW; false = PWM
-  motor_invert: false
+  motor_invert: true     # módulo activo-low: LOW=encendido, HIGH=apagado
 
   # ── OLED ─────────────────────────────────────────────────────────────────
   oled_address: "0x3C"  # quoted string — parsed with int(str(v), 16)
